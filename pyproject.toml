@@ -34,6 +34,9 @@ dependencies = [
     "modal",
 ]
 
+[project.scripts]
+rollout-viewer = "tinker_cookbook.rollout_viewer.app:main"
+
 [project.urls]
 Homepage = "https://thinkingmachines.ai/tinker"
 Repository = "https://github.com/thinking-machines-lab/tinker"
@@ -64,12 +67,17 @@ verifiers = [
     "verifiers>=0.1.9,<0.1.10",
     "openai",
 ]
+rollout-viewer = [
+    "textual>=0.50.0",
+    "watchdog>=3.0.0",
+]
 all = [
     "tinker_cookbook[vector-search]",
     "tinker_cookbook[wandb]",
     "tinker_cookbook[neptune-scale]",
     "tinker_cookbook[trackio]",
     "tinker_cookbook[verifiers]",
+    "tinker_cookbook[rollout-viewer]",
 ]
 
 [build-system]
