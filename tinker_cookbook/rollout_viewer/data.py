@@ -1,6 +1,7 @@
 """JSONL data loading and file watching for rollout viewer."""
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any, Callable
 
 from watchdog.events import FileModifiedEvent, FileSystemEventHandler
 from watchdog.observers import Observer  # pyright: ignore[reportUnknownVariableType]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,32 +49,36 @@ def load_rollouts(path: Path) -> list[Rollout]:
         for i, line in enumerate(f):
             if not line.strip():
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                # Skip partial/malformed lines (can happen if file is read while being written)
+                logger.debug(f"Skipping malformed JSON at line {i + 1}")
+                continue
 
             # Parse token counts
-            raw_counts = data.get("token_counts", [])
             token_counts = [
                 TokenCount(
-                    content_tokens=tc.get("content_tokens", 0),
-                    reasoning_tokens=tc.get("reasoning_tokens", 0),
+                    content_tokens=tc["content_tokens"],
+                    reasoning_tokens=tc["reasoning_tokens"],
                 )
-                for tc in raw_counts
+                for tc in data["token_counts"]
             ]
 
             rollouts.append(
                 Rollout(
                     index=i,
                     timestamp=data["timestamp"],
-                    step=data.get("step", 0),
-                    selection_type=data.get("selection_type", "unknown"),
-                    sample_id=data.get("sample_id"),
+                    step=data["step"],
+                    selection_type=data["selection_type"],
+                    sample_id=data.get("sample_id"),  # Legitimately optional
                     conversation=data["conversation"],
                     token_counts=token_counts,
-                    scores=data.get("scores", {}),
-                    individual_rewards=data.get("individual_rewards", {}),
-                    total_reward=data.get("total_reward", 0.0),
-                    renderer_name=data.get("renderer_name", "unknown"),
-                    sample_info=data.get("sample_info", {}),
+                    scores=data.get("scores", {}),  # Not always present
+                    individual_rewards=data["individual_rewards"],
+                    total_reward=data["total_reward"],
+                    renderer_name=data["renderer_name"],
+                    sample_info=data["sample_info"],
                 )
             )
 

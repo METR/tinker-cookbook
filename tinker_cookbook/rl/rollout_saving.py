@@ -2,17 +2,32 @@
 
 import json
 import logging
+import math
 import random
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Protocol, TypeVar
 
 from tinker_cookbook.renderers import Renderer
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+class Tokenizer(Protocol):
+    """Protocol for tokenizers used in rollout saving."""
+
+    def encode(
+        self, text: str, *args: Any, add_special_tokens: bool = ..., **kwargs: Any
+    ) -> list[int]: ...
+
+
+def _sort_key_with_nan(r: dict[str, Any]) -> tuple[bool, float]:
+    """Sort key that puts NaN values at the end."""
+    reward = r["total_reward"]
+    return (math.isnan(reward), reward)
 
 
 def select_rollouts_to_save(rollouts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -22,37 +37,35 @@ def select_rollouts_to_save(rollouts: list[dict[str, Any]]) -> list[dict[str, An
     1. Worst (lowest total_reward)
     2. Best (highest total_reward)
     3. One random from the remaining
+
+    NaN rewards are sorted to the end and excluded from best/worst selection.
     """
     if len(rollouts) == 0:
         return []
     if len(rollouts) == 1:
-        rollouts[0]["selection_type"] = "only"
-        return rollouts
+        only = rollouts[0].copy()
+        only["selection_type"] = "only"
+        return [only]
 
-    sorted_rollouts = sorted(rollouts, key=lambda r: r["total_reward"])
+    # Sort with NaN values at the end
+    sorted_rollouts = sorted(rollouts, key=_sort_key_with_nan)
 
-    to_save: list[dict[str, Any]] = []
-    used_indices: set[int] = set()
+    # Warn if any NaN rewards are present
+    nan_count = sum(1 for r in rollouts if math.isnan(r["total_reward"]))
+    if nan_count > 0:
+        logger.warning(f"Found {nan_count} rollouts with NaN rewards out of {len(rollouts)}")
 
-    # Worst (lowest reward)
-    worst_idx = 0
-    worst = sorted_rollouts[worst_idx].copy()
+    worst = sorted_rollouts[0].copy()
     worst["selection_type"] = "worst"
-    to_save.append(worst)
-    used_indices.add(worst_idx)
 
-    # Best (highest reward)
-    best_idx = len(sorted_rollouts) - 1
-    if best_idx not in used_indices:
-        best = sorted_rollouts[best_idx].copy()
-        best["selection_type"] = "best"
-        to_save.append(best)
-        used_indices.add(best_idx)
+    best = sorted_rollouts[-1].copy()
+    best["selection_type"] = "best"
 
-    # Random from the rest
-    remaining_indices = [i for i in range(len(sorted_rollouts)) if i not in used_indices]
-    if remaining_indices:
-        rand_idx = random.choice(remaining_indices)
+    to_save = [worst, best]
+
+    # Random from middle (indices 1 to len-2)
+    if len(sorted_rollouts) > 2:
+        rand_idx = random.randint(1, len(sorted_rollouts) - 2)
         rand_rollout = sorted_rollouts[rand_idx].copy()
         rand_rollout["selection_type"] = "random"
         to_save.append(rand_rollout)
@@ -62,19 +75,16 @@ def select_rollouts_to_save(rollouts: list[dict[str, Any]]) -> list[dict[str, An
 
 def compute_message_tokens(
     message: dict[str, Any],
-    tokenizer: Any,
+    tokenizer: Tokenizer,
 ) -> dict[str, int]:
     """Compute token counts for a message's content and reasoning."""
     content = message.get("content", "")
     reasoning = message.get("reasoning_content")
 
-    content_tokens = 0
-    if content:
-        content_tokens = len(tokenizer.encode(content, add_special_tokens=False))  # pyright: ignore[reportUnknownMemberType]
-
-    reasoning_tokens = 0
-    if reasoning:
-        reasoning_tokens = len(tokenizer.encode(reasoning, add_special_tokens=False))  # pyright: ignore[reportUnknownMemberType]
+    content_tokens = len(tokenizer.encode(content, add_special_tokens=False)) if content else 0
+    reasoning_tokens = (
+        len(tokenizer.encode(reasoning, add_special_tokens=False)) if reasoning else 0
+    )
 
     return {
         "content_tokens": content_tokens,
@@ -162,10 +172,9 @@ def with_rollout_saving(
         # Call inner function first to get rewards
         total_reward, rewards = inner_fn(ctx)
 
-        # Build rollout record
-        record = record_builder(ctx, total_reward, rewards, step_counter, renderer_name)
-
         with lock:
+            # Build rollout record inside lock to get consistent step_counter
+            record = record_builder(ctx, total_reward, rewards, step_counter, renderer_name)
             batch_buffer.append(record)
 
             # Check if batch is complete

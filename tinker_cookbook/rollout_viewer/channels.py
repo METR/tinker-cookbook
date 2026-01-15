@@ -22,6 +22,12 @@ CHANNEL_COLORS: dict[str, str] = {
     "tool_result": "green",
 }
 
+# Compiled regex for Harmony format channel parsing
+_HARMONY_PATTERN = re.compile(
+    r"<\|channel\|>(\w+)<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|<\|call\|>|$)",
+    re.DOTALL,
+)
+
 
 def extract_reasoning_from_harmony(content: str) -> tuple[str, str]:
     """Extract reasoning and final content from raw Harmony format.
@@ -29,12 +35,10 @@ def extract_reasoning_from_harmony(content: str) -> tuple[str, str]:
     Returns:
         (reasoning_content, final_content) - text extracted from analysis and final channels
     """
-    pattern = r"<\|channel\|>(\w+)<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|<\|call\|>|$)"
-
     reasoning = ""
     final = ""
 
-    for match in re.finditer(pattern, content, re.DOTALL):
+    for match in _HARMONY_PATTERN.finditer(content):
         channel = match.group(1)
         text = match.group(2)
         if channel == "analysis":
@@ -54,10 +58,7 @@ def _parse_harmony_content(content: str) -> list[ChannelContent]:
     """
     parts: list[ChannelContent] = []
 
-    # Pattern for Harmony channels
-    pattern = r"<\|channel\|>(\w+)<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|<\|call\|>|$)"
-
-    for match in re.finditer(pattern, content, re.DOTALL):
+    for match in _HARMONY_PATTERN.finditer(content):
         channel = match.group(1)
         text = match.group(2)
         if channel == "analysis":

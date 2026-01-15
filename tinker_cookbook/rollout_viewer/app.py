@@ -257,6 +257,7 @@ class RolloutViewer(App[None]):
     def _stop_file_watcher(self) -> None:
         if self.observer is not None:
             self.observer.stop()
+            self.observer.join()
             self.observer = None
 
     def _on_file_change(self) -> None:
