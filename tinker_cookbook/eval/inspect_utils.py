@@ -144,9 +144,9 @@ class InspectAPIFromTinkerSampling(InspectAIModelAPI):
         all_choices = [
             InspectAIModelOutputChoice(
                 message=InspectAIChatMessageAssistant(content=r, model=self.model_name),
-                stop_reason="stop",
+                stop_reason=seq.stop_reason,
             )
-            for r in responses_text
+            for r, seq in zip(responses_text, sampled_token_sequences, strict=True)
         ]
         usage = get_model_usage(prompt.to_ints(), sampled_token_sequences)
 
