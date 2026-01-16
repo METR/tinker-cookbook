@@ -5,7 +5,6 @@ import logging
 import math
 import random
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol, TypeVar
 
@@ -97,8 +96,8 @@ def with_rollout_saving(
     output_path: Path,
     renderer: Renderer,
     samples_per_batch: int,
+    build_record: Callable[[T, float, dict[str, float], int, str], dict[str, Any]],
     save_every: int = 10,
-    build_record: Callable[[T, float, dict[str, float], int, str], dict[str, Any]] | None = None,
 ) -> Callable[[T], tuple[float, dict[str, float]]]:
     """Wrap a reward function to save rollouts periodically.
 
@@ -107,64 +106,25 @@ def with_rollout_saving(
     Args:
         inner_fn: The original reward function to wrap
         output_path: Path to the rollouts.jsonl file
-        renderer: Tinker Renderer instance (used for renderer_name and tokenizer)
+        renderer: Tinker Renderer instance (used for renderer_name)
         samples_per_batch: Number of samples per batch (batch_size * group_size)
-        save_every: Save rollouts every N steps (default: 10)
-        build_record: Optional function to build a custom rollout record.
+        build_record: Function to build a rollout record from context.
             Signature: (ctx, total_reward, rewards, step, renderer_name) -> dict
-            If not provided, a default record builder is used that expects ctx to have
-            'conversation', 'sample_info', and optionally 'scores' attributes/keys.
+            The returned dict should include at minimum: timestamp, step, conversation,
+            token_counts, individual_rewards, total_reward, renderer_name.
+            Use compute_message_tokens() helper for token counting.
+        save_every: Save rollouts every N steps (default: 10)
 
     Returns:
         Wrapped function that periodically saves selected rollouts to JSONL
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     renderer_name = renderer.__class__.__name__
-    tokenizer = renderer.tokenizer
 
     # Thread-safe state
     lock = threading.Lock()
     batch_buffer: list[dict[str, Any]] = []
     step_counter = 0
-
-    def default_build_record(
-        ctx: Any,
-        total_reward: float,
-        rewards: dict[str, float],
-        step: int,
-        rname: str,
-    ) -> dict[str, Any]:
-        """Default record builder for contexts with conversation and sample_info."""
-        # Try to get conversation and sample_info from ctx
-        conversation: list[dict[str, Any]] = []
-        sample_info: dict[str, Any] = {}
-
-        if hasattr(ctx, "conversation"):
-            conversation = list(ctx.conversation)
-        elif isinstance(ctx, dict) and "conversation" in ctx:
-            conversation = list(ctx["conversation"])
-
-        if hasattr(ctx, "sample_info"):
-            sample_info = dict(getattr(ctx, "sample_info"))
-        elif isinstance(ctx, dict) and "sample_info" in ctx:
-            sample_info = dict(ctx["sample_info"])
-
-        # Compute token counts
-        token_counts = [compute_message_tokens(msg, tokenizer) for msg in conversation]
-
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "step": step,
-            "sample_id": sample_info.get("inspect_sample_id"),
-            "conversation": conversation,
-            "token_counts": token_counts,
-            "sample_info": sample_info,
-            "individual_rewards": rewards,
-            "total_reward": total_reward,
-            "renderer_name": rname,
-        }
-
-    record_builder = build_record if build_record is not None else default_build_record
 
     def wrapper(ctx: T) -> tuple[float, dict[str, float]]:
         nonlocal batch_buffer, step_counter
@@ -174,7 +134,7 @@ def with_rollout_saving(
 
         with lock:
             # Build rollout record inside lock to get consistent step_counter
-            record = record_builder(ctx, total_reward, rewards, step_counter, renderer_name)
+            record = build_record(ctx, total_reward, rewards, step_counter, renderer_name)
             batch_buffer.append(record)
 
             # Check if batch is complete
