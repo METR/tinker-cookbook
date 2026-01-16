@@ -47,7 +47,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
-    "pyright",
+    "basedpyright>=1.37.1",
 ]
 vector-search = [
     "chromadb",
@@ -92,8 +92,3 @@ python_files = ["test_*.py", "*_test.py"]
 
 [tool.ruff]
 line-length = 100
-
-[dependency-groups]
-dev = [
-    "basedpyright>=1.37.1",
-]
