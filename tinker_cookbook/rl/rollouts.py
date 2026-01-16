@@ -30,13 +30,20 @@ async def do_single_rollout(policy: TokenCompleter, env: Env) -> Trajectory:
     while True:
         ac_with_logprobs = await policy(ob, stop_condition)
         step_result = await env.step(ac_with_logprobs.tokens)
+
+        # Build logs dict, optionally including stop_reason from sampling metadata
+        # Shallow copy is safe: Logs type only contains immutable values (str | int | float)
+        logs = dict(step_result.logs)
+        if ac_with_logprobs.stop_reason is not None:
+            logs["sampling_stop_reason"] = ac_with_logprobs.stop_reason
+
         transition = Transition(
             ob=ob,
             ac=ac_with_logprobs,
             reward=step_result.reward,
             episode_done=step_result.episode_done,
             metrics=step_result.metrics,
-            logs=step_result.logs,
+            logs=logs,
         )
         transitions.append(transition)
         ob = step_result.next_observation

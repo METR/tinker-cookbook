@@ -7,7 +7,7 @@ Evals and other code should use the appropriate interface.
 """
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import tinker
 
@@ -17,17 +17,46 @@ from tinker_cookbook import renderers
 
 StopCondition: TypeAlias = list[str] | list[int]
 
+# Matches tinker SDK's StopReason type exactly
+StopReasonType: TypeAlias = Literal["length", "stop"]
+
+
+@dataclass
+class SamplingMetadata:
+    """Metadata from the sampling process.
+
+    Captures metadata returned by the tinker sampling client. Some fields
+    are only populated if explicitly requested in SamplingParams.
+    """
+
+    stop_reason: StopReasonType
+    """Reason why sampling stopped: 'length' (max_tokens) or 'stop' (stop sequence/EOS)."""
+
+    prompt_logprobs: list[float | None] | None = None
+    """Log probabilities for each prompt token. Only present if include_prompt_logprobs=True."""
+
+    topk_prompt_logprobs: list[list[tuple[int, float]] | None] | None = None
+    """Top-k log probabilities for each prompt token. Only present if topk_prompt_logprobs > 0."""
+
 
 @dataclass
 class TokensWithLogprobs:
     tokens: list[int]
     maybe_logprobs: list[float] | None
+    sampling_metadata: SamplingMetadata | None = None
 
     @property
     def logprobs(self) -> list[float]:
         if self.maybe_logprobs is None:
             raise ValueError("Logprobs are not available")
         return self.maybe_logprobs
+
+    @property
+    def stop_reason(self) -> StopReasonType | None:
+        """Convenience accessor for stop_reason from sampling_metadata."""
+        if self.sampling_metadata is None:
+            return None
+        return self.sampling_metadata.stop_reason
 
 
 class TokenCompleter:
@@ -72,11 +101,24 @@ class TinkerTokenCompleter(TokenCompleter):
         )
 
         # Extract tokens and logprobs from the first (and only) sample
-        sampled_tokens = sample_result.sequences[0].tokens
-        sampled_logprobs = sample_result.sequences[0].logprobs
+        sampled_sequence = sample_result.sequences[0]
+        sampled_tokens = sampled_sequence.tokens
+        sampled_logprobs = sampled_sequence.logprobs
         assert sampled_logprobs is not None
 
-        return TokensWithLogprobs(tokens=sampled_tokens, maybe_logprobs=sampled_logprobs)
+        # Capture sampling metadata (prompt_logprobs/topk_prompt_logprobs are None
+        # unless explicitly requested in SamplingParams - infrastructure for future use)
+        metadata = SamplingMetadata(
+            stop_reason=sampled_sequence.stop_reason,
+            prompt_logprobs=sample_result.prompt_logprobs,
+            topk_prompt_logprobs=sample_result.topk_prompt_logprobs,
+        )
+
+        return TokensWithLogprobs(
+            tokens=sampled_tokens,
+            maybe_logprobs=sampled_logprobs,
+            sampling_metadata=metadata,
+        )
 
 
 class TinkerMessageCompleter(MessageCompleter):
