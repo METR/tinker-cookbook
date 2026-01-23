@@ -26,14 +26,17 @@ class RolloutViewer(App[None]):
     CSS = """
     #main {
         layout: horizontal;
+        height: 1fr;
     }
     #conversation {
         width: 70%;
+        height: 100%;
         border: solid green;
         padding: 1;
     }
     #sidebar {
         width: 30%;
+        height: 100%;
         border: solid blue;
         padding: 1;
     }
