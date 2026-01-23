@@ -137,6 +137,10 @@ class RolloutViewer(App[None]):
         info.append(f"{rollout.selection_type}\n", style=selection_style)
         info.append(f"Sample ID: {rollout.sample_id}\n")
         info.append(f"Turns: {len(rollout.conversation)}\n")
+        if rollout.stop_reason is not None:
+            stop_style = "bold red" if rollout.stop_reason == "length" else "green"
+            info.append("Stop: ")
+            info.append(f"{rollout.stop_reason}\n", style=stop_style)
         info.append(f"Renderer: {rollout.renderer_name}\n")
         if self.watch_mode:
             info.append("[WATCHING]\n", style="bold yellow")

@@ -37,6 +37,7 @@ class Rollout:
     total_reward: float
     renderer_name: str
     sample_info: dict[str, Any]
+    stop_reason: str | None = None  # "stop" or "length"
 
 
 def load_rollouts(path: Path) -> list[Rollout]:
@@ -79,6 +80,7 @@ def load_rollouts(path: Path) -> list[Rollout]:
                     total_reward=data["total_reward"],
                     renderer_name=data["renderer_name"],
                     sample_info=data["sample_info"],
+                    stop_reason=data.get("stop_reason"),
                 )
             )
 
