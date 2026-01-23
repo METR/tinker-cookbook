@@ -7,7 +7,7 @@ from typing import Any
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.containers import Horizontal, ScrollableContainer
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Static
 
@@ -88,7 +88,7 @@ class RolloutViewer(App[None]):
         with Horizontal(id="main"):
             with ScrollableContainer(id="conversation"):
                 yield Static("Loading...", id="turn-display")
-            with Vertical(id="sidebar"):
+            with ScrollableContainer(id="sidebar"):
                 yield Static("", id="rollout-info")
                 yield Static("", id="tokens-panel")
                 yield Static("", id="reward-panel")
