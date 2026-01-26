@@ -737,10 +737,14 @@ async def do_group_rollout_and_filter_constant_reward(
         trajectory_group = await do_group_rollout(env_group_builder, policy)
 
     # Remove if all trajectories have the same reward
-    if do_remove_constant_reward_groups and all_same(trajectory_group.get_total_rewards()):
-        return None
-    else:
-        return trajectory_group
+    if do_remove_constant_reward_groups:
+        rewards = trajectory_group.get_total_rewards()
+        if all_same(rewards):
+            logger.warning(
+                f"Filtering group with constant reward: {rewards[0]:.4f} (n_trajectories={len(rewards)}, tags={env_group_builder.logging_tags()})"
+            )
+            return None
+    return trajectory_group
 
 
 @scope
@@ -895,17 +899,26 @@ async def do_train_step_streaming_and_get_sampling_client(
 
             if len(wrapped_trajectory_groups) < groups_per_minibatch:
                 continue
-            logger.info(
-                f"[stream_minibatch] Step {i_batch}, Substep {i_substep}/{cfg.num_substeps}, Minibatch {i_minibatch}/{cfg.stream_minibatch_config.num_minibatches}: Will train on minibatch, num groups: {len(wrapped_trajectory_groups)}"
-            )
 
-            # Note: we may have removed trajectory groups that have the same reward.
-            # To have the same results as the sync implementation, we will
-            # remove these and train on a smaller batch.
-            wrapped_trajectory_groups = [g for g in wrapped_trajectory_groups if g is not None]
-            if len(wrapped_trajectory_groups) == 0:
+            # Filter out None values (from constant-reward groups) before training
+            valid_groups = [g for g in wrapped_trajectory_groups if g is not None]
+            if len(valid_groups) == 0:
+                logger.warning(
+                    f"[stream_minibatch] Step {i_batch}, Substep {i_substep}, Minibatch {i_minibatch}: All {len(wrapped_trajectory_groups)} groups had constant rewards, skipping minibatch"
+                )
                 i_minibatch += 1
+                wrapped_trajectory_groups = []
                 continue
+
+            if len(valid_groups) < len(wrapped_trajectory_groups):
+                logger.warning(
+                    f"[stream_minibatch] Step {i_batch}, Substep {i_substep}, Minibatch {i_minibatch}: {len(wrapped_trajectory_groups) - len(valid_groups)}/{len(wrapped_trajectory_groups)} groups had constant rewards, training on {len(valid_groups)} groups"
+                )
+            else:
+                logger.info(
+                    f"[stream_minibatch] Step {i_batch}, Substep {i_substep}/{cfg.num_substeps}, Minibatch {i_minibatch}/{cfg.stream_minibatch_config.num_minibatches}: Will train on minibatch, num groups: {len(valid_groups)}"
+                )
+            wrapped_trajectory_groups = valid_groups
 
             data_D, prepare_minibatch_metrics = await prepare_minibatch(
                 [g.env_group_builder for g in wrapped_trajectory_groups],
@@ -949,6 +962,16 @@ async def do_train_step_streaming_and_get_sampling_client(
 
         if optim_result.metrics:
             metrics.update(optim_result.metrics)
+
+    # Check if all trajectory groups were filtered out
+    if not all_wrapped_trajectory_groups:
+        logger.warning(
+            f"Step {i_batch}: All trajectory groups were filtered out (likely due to constant rewards). Skipping metrics computation and continuing to next batch."
+        )
+        sampling_client, _ = await save_checkpoint_and_get_sampling_client(
+            training_client, i_batch + 1, cfg.log_path, cfg.save_every
+        )
+        return sampling_client, {"training/step_skipped": True, "training/groups_valid": 0}
 
     # Aggregate metrics across the entire batch
     metrics.update(compute_sampling_client_metrics(all_wrapped_trajectory_groups))

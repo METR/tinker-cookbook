@@ -197,11 +197,22 @@ def remove_constant_reward_groups(
     trajectory_groups_P: List[TrajectoryGroup],
 ) -> List[TrajectoryGroup]:
     new_groups: list[TrajectoryGroup] = []
+    filtered_rewards: list[float] = []
     for group in trajectory_groups_P:
-        if not all_same(group.get_total_rewards()):
+        rewards = group.get_total_rewards()
+        if not all_same(rewards):
             new_groups.append(group)
+        else:
+            filtered_rewards.append(rewards[0])
+
+    if filtered_rewards:
+        logger.warning(
+            f"Filtered {len(filtered_rewards)} groups with constant rewards: {filtered_rewards}"
+        )
+
     if not new_groups:
-        logger.warning("All rewards are uniform. There will be no gradient")
-        return trajectory_groups_P[0:1]  # return singleton list in case empty
-        # list will cause problems
+        logger.warning(
+            "All rewards are uniform. Returning first group to avoid empty batch. This will likely result in zero gradient."
+        )
+        return trajectory_groups_P[0:1]
     return new_groups
