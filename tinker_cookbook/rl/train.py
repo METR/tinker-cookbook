@@ -1124,14 +1124,8 @@ async def do_sync_training(
             if group is not None
         ]
         n_failed = len(trajectory_groups_P) - len(valid_pairs)
-
-        if valid_pairs:
-            valid_builders_seq, valid_groups = zip(*valid_pairs, strict=True)
-            valid_builders: list[EnvGroupBuilder] = list(valid_builders_seq)
-            valid_trajectory_groups: list[TrajectoryGroup] = list(valid_groups)
-        else:
-            valid_builders = []
-            valid_trajectory_groups = []
+        valid_builders: list[EnvGroupBuilder] = [b for b, _ in valid_pairs]
+        valid_trajectory_groups: list[TrajectoryGroup] = [g for _, g in valid_pairs]
 
         if cfg.remove_constant_reward_groups and valid_trajectory_groups:
             valid_trajectory_groups = remove_constant_reward_groups(valid_trajectory_groups)
