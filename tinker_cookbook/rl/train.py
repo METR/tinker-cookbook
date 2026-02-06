@@ -24,7 +24,6 @@ from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingCli
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
-    remove_constant_reward_groups,
 )
 from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics
 from tinker_cookbook.rl.metrics import (
@@ -1117,33 +1116,42 @@ async def do_sync_training(
                 desc=f"Sampling batch {i_batch}",
             )
 
-        # Filter out None groups (from API errors) and their corresponding builders
-        valid_pairs = [
-            (builder, group)
-            for builder, group in safezip(env_group_builders_P, trajectory_groups_P)
-            if group is not None
-        ]
-        n_failed = len(trajectory_groups_P) - len(valid_pairs)
-        valid_builders: list[EnvGroupBuilder] = [b for b, _ in valid_pairs]
-        valid_trajectory_groups: list[TrajectoryGroup] = [g for _, g in valid_pairs]
-
-        if cfg.remove_constant_reward_groups and valid_trajectory_groups:
-            valid_trajectory_groups = remove_constant_reward_groups(valid_trajectory_groups)
-
-        if not valid_trajectory_groups:
-            logger.warning(
-                f"Step {i_batch}: All groups failed or were filtered. Skipping train step."
-            )
-            metrics["rollout/groups_failed"] = n_failed
-            metrics["time/total"] = time.time() - t_start
-            ml_logger.log_metrics(metrics, step=i_batch)
-            continue
+        # Filter out None groups (API errors) and constant-reward groups in one pass
+        # so that builders and trajectory groups stay aligned
+        valid_builders: list[EnvGroupBuilder] = []
+        valid_trajectory_groups: list[TrajectoryGroup] = []
+        n_failed = 0
+        n_constant_reward = 0
+        for builder, group in safezip(env_group_builders_P, trajectory_groups_P):
+            if group is None:
+                n_failed += 1
+                continue
+            if cfg.remove_constant_reward_groups:
+                rewards = group.get_total_rewards()
+                if all_same(rewards):
+                    n_constant_reward += 1
+                    continue
+            valid_builders.append(builder)
+            valid_trajectory_groups.append(group)
 
         if n_failed > 0:
             logger.warning(
                 f"Step {i_batch}: {n_failed}/{len(trajectory_groups_P)} groups failed during rollout"
             )
+        if n_constant_reward > 0:
+            logger.warning(
+                f"Step {i_batch}: {n_constant_reward}/{len(trajectory_groups_P)} groups had constant rewards"
+            )
         metrics["rollout/groups_failed"] = n_failed
+        metrics["rollout/groups_constant_reward"] = n_constant_reward
+
+        if not valid_trajectory_groups:
+            logger.warning(
+                f"Step {i_batch}: All groups failed or were filtered. Skipping train step."
+            )
+            metrics["time/total"] = time.time() - t_start
+            ml_logger.log_metrics(metrics, step=i_batch)
+            continue
 
         # Train step
         sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
