@@ -733,8 +733,14 @@ async def do_group_rollout_and_filter_constant_reward(
 ) -> TrajectoryGroup | None:
     policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature)
 
-    with logtree.optional_enable_logging(enable_logging):
-        trajectory_group = await do_group_rollout(env_group_builder, policy)
+    try:
+        with logtree.optional_enable_logging(enable_logging):
+            trajectory_group = await do_group_rollout(env_group_builder, policy)
+    except tinker.APIStatusError:
+        logger.exception(
+            f"API error during rollout, skipping group (tags={env_group_builder.logging_tags()})"
+        )
+        return None
 
     # Remove if all trajectories have the same reward
     if do_remove_constant_reward_groups:
