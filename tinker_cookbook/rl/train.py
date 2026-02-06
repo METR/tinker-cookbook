@@ -1117,8 +1117,39 @@ async def do_sync_training(
                 desc=f"Sampling batch {i_batch}",
             )
 
-        if cfg.remove_constant_reward_groups:
-            trajectory_groups_P = remove_constant_reward_groups(trajectory_groups_P)
+        # Filter out None groups (from API errors) and their corresponding builders
+        valid_pairs = [
+            (builder, group)
+            for builder, group in safezip(env_group_builders_P, trajectory_groups_P)
+            if group is not None
+        ]
+        n_failed = len(trajectory_groups_P) - len(valid_pairs)
+
+        if valid_pairs:
+            valid_builders_seq, valid_groups = zip(*valid_pairs, strict=True)
+            valid_builders: list[EnvGroupBuilder] = list(valid_builders_seq)
+            valid_trajectory_groups: list[TrajectoryGroup] = list(valid_groups)
+        else:
+            valid_builders = []
+            valid_trajectory_groups = []
+
+        if cfg.remove_constant_reward_groups and valid_trajectory_groups:
+            valid_trajectory_groups = remove_constant_reward_groups(valid_trajectory_groups)
+
+        if not valid_trajectory_groups:
+            logger.warning(
+                f"Step {i_batch}: All groups failed or were filtered. Skipping train step."
+            )
+            metrics["rollout/groups_failed"] = n_failed
+            metrics["time/total"] = time.time() - t_start
+            ml_logger.log_metrics(metrics, step=i_batch)
+            continue
+
+        if n_failed > 0:
+            logger.warning(
+                f"Step {i_batch}: {n_failed}/{len(trajectory_groups_P)} groups failed during rollout"
+            )
+        metrics["rollout/groups_failed"] = n_failed
 
         # Train step
         sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
@@ -1127,8 +1158,8 @@ async def do_sync_training(
             training_client,
             kl_reference_client,
             tokenizer,
-            env_group_builders_P,
-            trajectory_groups_P,
+            valid_builders,
+            valid_trajectory_groups,
         )
 
         # Log metrics
