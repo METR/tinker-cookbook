@@ -736,7 +736,7 @@ async def do_group_rollout_and_filter_constant_reward(
     try:
         with logtree.optional_enable_logging(enable_logging):
             trajectory_group = await do_group_rollout(env_group_builder, policy)
-    except tinker.APIStatusError:
+    except tinker.APIError:
         logger.exception(
             f"API error during rollout, skipping group (tags={env_group_builder.logging_tags()})"
         )

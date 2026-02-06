@@ -21,16 +21,29 @@ def mock_env_group_builder():
 
 
 @pytest.mark.asyncio
-async def test_api_status_error_returns_none(mock_sampling_client, mock_env_group_builder):
-    """When do_group_rollout raises APIStatusError, should return None instead of crashing."""
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            tinker.BadRequestError(
+                message="context length exceeded",
+                response=MagicMock(status_code=400),
+                body=None,
+            ),
+            id="bad_request",
+        ),
+        pytest.param(
+            tinker.APIConnectionError(request=MagicMock()),
+            id="connection_error",
+        ),
+    ],
+)
+async def test_api_error_returns_none(mock_sampling_client, mock_env_group_builder, error):
+    """When do_group_rollout raises an APIError subclass, should return None instead of crashing."""
     with patch(
         "tinker_cookbook.rl.train.do_group_rollout",
         new_callable=AsyncMock,
-        side_effect=tinker.BadRequestError(
-            message="context length exceeded",
-            response=MagicMock(status_code=400),
-            body=None,
-        ),
+        side_effect=error,
     ):
         result = await do_group_rollout_and_filter_constant_reward(
             sampling_client=mock_sampling_client,
