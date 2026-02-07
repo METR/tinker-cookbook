@@ -982,3 +982,14 @@ def test_kimi_streaming_with_emoji():
 
     assert "🤔" in final_thinking, "Final message missing thinking emoji"
     assert "🎉" in final_text, "Final message missing party emoji"
+
+
+def test_gptoss_to_openai_message_maps_internal_system_role():
+    tokenizer = get_tokenizer("openai/gpt-oss-20b")
+    renderer = GptOssRenderer(tokenizer, use_system_prompt=True, reasoning_effort="medium")
+
+    message: Message = {"role": GptOssRenderer._INTERNAL_SYSTEM_ROLE, "content": "You are helpful."}
+    result = renderer.to_openai_message(message)
+
+    assert result["role"] == "system"
+    assert result["content"] == "You are helpful."

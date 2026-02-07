@@ -463,7 +463,10 @@ class GptOssRenderer(Renderer):
         GptOss uses the analysis channel for thinking, which maps to reasoning_content
         in OpenAI's API format.
         """
-        result: dict = {"role": message["role"]}
+        role = message["role"]
+        if role == self._INTERNAL_SYSTEM_ROLE:
+            role = "system"
+        result: dict = {"role": role}
 
         content = message["content"]
         if isinstance(content, str):
