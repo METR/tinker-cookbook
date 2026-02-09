@@ -423,27 +423,31 @@ async def do_sync_training_with_stream_minibatch(
             async def trajectory_group_worker_task(
                 builder: EnvGroupBuilder, enable_logging: bool
             ) -> None:
-                metrics = {}
-                t_start = time.time()
-                trajectory_group = await do_group_rollout_and_filter_constant_reward(
-                    sampling_client,
-                    builder,
-                    max_tokens=cfg.max_tokens,
-                    temperature=cfg.temperature,
-                    do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
-                    enable_logging=enable_logging,
-                )
-                metrics["time/trajectory_group_worker_loop/total"] = time.time() - t_start
-                if trajectory_group is not None:
-                    trajectory_groups_queue.put_nowait(
-                        WrappedTrajectoryGroup(
-                            trajectory_group=trajectory_group,
-                            env_group_builder=builder,
-                            sampling_client_step=i_batch,
-                            metrics=metrics,
-                        )
+                try:
+                    metrics = {}
+                    t_start = time.time()
+                    trajectory_group = await do_group_rollout_and_filter_constant_reward(
+                        sampling_client,
+                        builder,
+                        max_tokens=cfg.max_tokens,
+                        temperature=cfg.temperature,
+                        do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                        enable_logging=enable_logging,
                     )
-                else:
+                    metrics["time/trajectory_group_worker_loop/total"] = time.time() - t_start
+                    if trajectory_group is not None:
+                        trajectory_groups_queue.put_nowait(
+                            WrappedTrajectoryGroup(
+                                trajectory_group=trajectory_group,
+                                env_group_builder=builder,
+                                sampling_client_step=i_batch,
+                                metrics=metrics,
+                            )
+                        )
+                    else:
+                        trajectory_groups_queue.put_nowait(None)
+                except Exception:
+                    logger.exception(f"trajectory_group_worker_task failed for batch {i_batch}")
                     trajectory_groups_queue.put_nowait(None)
 
             # Sample all trajectories asynchronously. If we have multiple minibatches,
@@ -557,30 +561,34 @@ async def do_async_training(
             if env_group_builder is None:
                 break
 
-            metrics = {}
-            t_start = time.time()
-            # Save a reference to the sampling client step in case it changes
-            # while we're running the rollout
-            sampling_client_step_copy = sampling_client_step
-            trajectory_group = await do_group_rollout_and_filter_constant_reward(
-                sampling_client,
-                env_group_builder,
-                max_tokens=cfg.max_tokens,
-                temperature=cfg.temperature,
-                do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
-            )
-            if trajectory_group is None:
-                trajectory_groups_queue.put_nowait(None)
-            else:
-                metrics["time/trajectory_group_worker_loop/total"] = time.time() - t_start
-                trajectory_groups_queue.put_nowait(
-                    WrappedTrajectoryGroup(
-                        trajectory_group=trajectory_group,
-                        env_group_builder=env_group_builder,
-                        sampling_client_step=sampling_client_step_copy,
-                        metrics=metrics,
-                    )
+            try:
+                metrics = {}
+                t_start = time.time()
+                # Save a reference to the sampling client step in case it changes
+                # while we're running the rollout
+                sampling_client_step_copy = sampling_client_step
+                trajectory_group = await do_group_rollout_and_filter_constant_reward(
+                    sampling_client,
+                    env_group_builder,
+                    max_tokens=cfg.max_tokens,
+                    temperature=cfg.temperature,
+                    do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
                 )
+                if trajectory_group is None:
+                    trajectory_groups_queue.put_nowait(None)
+                else:
+                    metrics["time/trajectory_group_worker_loop/total"] = time.time() - t_start
+                    trajectory_groups_queue.put_nowait(
+                        WrappedTrajectoryGroup(
+                            trajectory_group=trajectory_group,
+                            env_group_builder=env_group_builder,
+                            sampling_client_step=sampling_client_step_copy,
+                            metrics=metrics,
+                        )
+                    )
+            except Exception:
+                logger.exception(f"trajectory_group_worker_loop failed, dropping group (tags={env_group_builder.logging_tags()})")
+                trajectory_groups_queue.put_nowait(None)
 
     @scope
     async def training_loop():
