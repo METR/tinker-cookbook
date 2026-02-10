@@ -371,25 +371,44 @@ class GptOssRenderer(Renderer):
         # GptOss has no BOS token. System prompt is prepended as a message.
         return []
 
-    def _warn_if_user_system_message(self, messages: list[Message]) -> None:
-        """Warn if user provides system message when use_system_prompt=True."""
-        if self.use_system_prompt and messages and messages[0]["role"] == "system":
+    def _prepend_system_message(self, messages: list[Message]) -> list[Message]:
+        """Prepend the renderer's system message, merging with an existing internal
+        system message if one is already at the front (e.g. tool routing from
+        create_conversation_prefix_with_tools).
+
+        Per the Harmony spec the model should see a single <|start|>system block.
+        """
+        system_msg = self._get_system_message()
+        if system_msg is None:
+            return messages
+
+        messages = list(messages)
+        if messages and messages[0]["role"] == self._INTERNAL_SYSTEM_ROLE:
+            # Merge: append existing content onto the renderer's system message
+            merged = Message(
+                role=self._INTERNAL_SYSTEM_ROLE,
+                content=system_msg["content"] + "\n" + messages[0]["content"],
+            )
+            messages[0] = merged
+        elif messages and messages[0]["role"] == "system":
             warnings.warn(
-                "use_system_prompt=True but messages already start with a system message. "
-                "The built-in system prompt will be prepended, resulting in two system messages. "
+                "use_system_prompt=True but messages start with a user-provided system message. "
+                "The built-in system prompt will be prepended as a separate system block. "
                 "Either set use_system_prompt=False or remove the system message from your messages.",
                 UserWarning,
-                stacklevel=3,
+                stacklevel=2,
             )
+            messages = [system_msg] + messages
+        else:
+            messages = [system_msg] + messages
+
+        return messages
 
     def build_generation_prompt(
         self, messages: list[Message], role: Role = "assistant", prefill: str | None = None
     ) -> tinker.ModelInput:
         """Build generation prompt, prepending system message if configured."""
-        self._warn_if_user_system_message(messages)
-        system_msg = self._get_system_message()
-        if system_msg:
-            messages = [system_msg] + list(messages)
+        messages = self._prepend_system_message(messages)
         return super().build_generation_prompt(messages, role, prefill)
 
     def build_supervised_example(
@@ -398,10 +417,7 @@ class GptOssRenderer(Renderer):
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     ) -> tuple[tinker.ModelInput, torch.Tensor]:
         """Build supervised example, prepending system message if configured."""
-        self._warn_if_user_system_message(messages)
-        system_msg = self._get_system_message()
-        if system_msg:
-            messages = [system_msg] + list(messages)
+        messages = self._prepend_system_message(messages)
         return super().build_supervised_example(messages, train_on_what)
 
     @property
