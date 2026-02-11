@@ -223,6 +223,12 @@ class RolloutViewer(App[None]):
                 if len(str(answer)) > 50:
                     answer_preview += "..."
                 scores_text.append(f"  answer: {answer_preview}\n")
+            explanation = detail.get("explanation")
+            if explanation:
+                explanation_preview = str(explanation)[:200]
+                if len(str(explanation)) > 200:
+                    explanation_preview += "..."
+                scores_text.append(f"  explanation: {explanation_preview}\n", style="italic")
             metadata = detail.get("metadata", {})
             for k, v in metadata.items():
                 scores_text.append(f"  {k}: {v}\n", style="dim")

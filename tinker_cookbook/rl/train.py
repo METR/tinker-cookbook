@@ -587,7 +587,9 @@ async def do_async_training(
                         )
                     )
             except Exception:
-                logger.exception(f"trajectory_group_worker_loop failed, dropping group (tags={env_group_builder.logging_tags()})")
+                logger.exception(
+                    f"trajectory_group_worker_loop failed, dropping group (tags={env_group_builder.logging_tags()})"
+                )
                 trajectory_groups_queue.put_nowait(None)
 
     @scope
