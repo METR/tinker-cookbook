@@ -7,8 +7,9 @@ from logtree and can be logged using `logtree.log_formatter()`.
 """
 
 import html
+import json
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 from tinker_cookbook.renderers.base import Content, Message
 
@@ -57,6 +58,48 @@ def _render_content_html(content: Content) -> str:
     return "\n".join(parts_html)
 
 
+def _render_top_level_tool_calls(msg: dict[str, Any]) -> str:
+    """Render tool_calls / unparsed_tool_calls stored as top-level message fields."""
+    parts: list[str] = []
+    for tc in msg.get("tool_calls", []):
+        fn = tc.get("function", {})
+        name = html.escape(fn.get("name", "unknown"))
+        raw_args = fn.get("arguments", "")
+        try:
+            args_str = html.escape(json.dumps(json.loads(raw_args), indent=2))
+        except (json.JSONDecodeError, TypeError):
+            args_str = html.escape(raw_args)
+        parts.append(
+            f'<div class="lt-tool-call-part">'
+            f'<span class="lt-tool-call-label">🔧 Tool Call:</span> '
+            f"<code>{name}({args_str})</code>"
+            f"</div>"
+        )
+    for utc in msg.get("unparsed_tool_calls", []):
+        raw = html.escape(utc.get("raw_text", str(utc)))
+        error = html.escape(utc.get("error", ""))
+        parts.append(
+            f'<div class="lt-unparsed-tool-call-part">'
+            f'<span class="lt-tool-call-label">⚠️ Unparsed Tool Call:</span> '
+            f"<code>{raw}</code>"
+            f'<div class="lt-error">{error}</div>'
+            f"</div>"
+        )
+    return "\n".join(parts)
+
+
+def _render_tool_meta(msg: dict[str, Any]) -> str:
+    """Render function name and tool_call_id for tool-result messages."""
+    label_parts: list[str] = []
+    if name := msg.get("name"):
+        label_parts.append(html.escape(name))
+    if tool_call_id := msg.get("tool_call_id"):
+        label_parts.append(f"id={html.escape(tool_call_id)}")
+    if not label_parts:
+        return ""
+    return f'<span class="lt-tool-meta">{" ".join(label_parts)}</span>'
+
+
 @dataclass
 class ConversationFormatter:
     """
@@ -75,9 +118,13 @@ class ConversationFormatter:
         for msg in self.messages:
             role = html.escape(msg["role"])
             content_html = _render_content_html(msg["content"])
+            extra_html = _render_top_level_tool_calls(msg)
+            tool_meta_html = _render_tool_meta(msg) if role == "tool" else ""
             parts.append(f'  <div class="lt-message lt-message-{role}">')
             parts.append(f'    <span class="lt-message-role">{role}:</span>')
-            parts.append(f'    <div class="lt-message-content">{content_html}</div>')
+            if tool_meta_html:
+                parts.append(f"    {tool_meta_html}")
+            parts.append(f'    <div class="lt-message-content">{content_html}{extra_html}</div>')
             parts.append("  </div>")
         parts.append("</div>")
         return "\n".join(parts)
@@ -151,6 +198,17 @@ CONVERSATION_CSS = """
 
 .lt-message-tool .lt-message-role {
     color: #2e7d32;
+}
+
+.lt-tool-meta {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.4rem;
+    background: #d1fae5;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #065f46;
 }
 
 /* Content part styling */

@@ -1,5 +1,6 @@
 """Channel detection and coloring for different renderers."""
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -70,7 +71,9 @@ def _parse_harmony_content(content: str) -> list[ChannelContent]:
         else:
             parts.append(ChannelContent("text", text))
 
-    return parts if parts else [ChannelContent("text", content)]
+    if not parts and content.strip():
+        parts.append(ChannelContent("text", content))
+    return parts
 
 
 def _parse_qwen3_content(content: str) -> list[ChannelContent]:
@@ -98,7 +101,9 @@ def _parse_qwen3_content(content: str) -> list[ChannelContent]:
         if text.strip():
             parts.append(ChannelContent("text", text))
 
-    return parts if parts else [ChannelContent("text", content)]
+    if not parts and content.strip():
+        parts.append(ChannelContent("text", content))
+    return parts
 
 
 def _parse_structured_content(content: list[dict[str, Any]]) -> list[ChannelContent]:
@@ -126,6 +131,36 @@ def _parse_structured_content(content: list[dict[str, Any]]) -> list[ChannelCont
     return parts if parts else [ChannelContent("text", str(content))]
 
 
+def _format_tool_call(tc: dict[str, Any]) -> str:
+    """Format a single tool call dict into a readable string."""
+    fn = tc.get("function", {})
+    name = fn.get("name", "unknown")
+    raw_args = fn.get("arguments", "")
+    # Pretty-print JSON arguments when possible
+    try:
+        parsed = json.loads(raw_args)
+        args_str = json.dumps(parsed, indent=2)
+    except (json.JSONDecodeError, TypeError):
+        args_str = raw_args
+    return f"{name}({args_str})"
+
+
+def _append_tool_calls(
+    parts: list[ChannelContent], message: dict[str, Any]
+) -> list[ChannelContent]:
+    """Append top-level tool_calls / unparsed_tool_calls from the message."""
+    for tc in message.get("tool_calls", []):
+        parts.append(ChannelContent("tool_call", _format_tool_call(tc)))
+    for utc in message.get("unparsed_tool_calls", []):
+        raw = utc.get("raw_text", str(utc))
+        error = utc.get("error", "")
+        label = f"[unparsed] {raw}"
+        if error:
+            label += f"\n  error: {error}"
+        parts.append(ChannelContent("tool_call", label))
+    return parts
+
+
 def parse_message_content(
     message: dict[str, Any],
     renderer_name: str,
@@ -142,9 +177,18 @@ def parse_message_content(
     content = message.get("content", "")
     role = message.get("role", "")
 
-    # Handle tool role
+    # Handle tool role — show function name header before output
     if role == "tool":
-        return [ChannelContent("tool_result", str(content))]
+        header_parts: list[str] = []
+        if name := message.get("name"):
+            header_parts.append(name)
+        if tool_call_id := message.get("tool_call_id"):
+            header_parts.append(f"id={tool_call_id}")
+        parts: list[ChannelContent] = []
+        if header_parts:
+            parts.append(ChannelContent("tool_call", " ".join(header_parts)))
+        parts.append(ChannelContent("tool_result", str(content)))
+        return parts
 
     # Handle structured content (list of parts)
     if isinstance(content, list):
@@ -153,16 +197,18 @@ def parse_message_content(
     # Check for reasoning_content field (OpenAI-style normalized format)
     reasoning = message.get("reasoning_content")
     if reasoning:
-        parts: list[ChannelContent] = [ChannelContent("thinking", reasoning)]
+        parts = [ChannelContent("thinking", reasoning)]
         if content:
             parts.append(ChannelContent("text", content))
-        return parts
+        return _append_tool_calls(parts, message)
 
     # Parse string content based on renderer
     if "GptOss" in renderer_name:
-        return _parse_harmony_content(content)
+        parts = _parse_harmony_content(content)
     elif "Qwen3" in renderer_name:
-        return _parse_qwen3_content(content)
+        parts = _parse_qwen3_content(content)
     else:
-        # Generic fallback - just return as text
-        return [ChannelContent("text", content)]
+        # Generic fallback - skip empty content
+        parts = [ChannelContent("text", content)] if content.strip() else []
+
+    return _append_tool_calls(parts, message)
