@@ -198,6 +198,9 @@ def _rich_console_use_logger(console: Console):
     # ^^^ add a leading newline so things like table formatting work properly
 
 
+WANDB_RUN_ID_FILE = "wandb_run_id.txt"
+
+
 class WandbLogger(Logger):
     """Logger for Weights & Biases."""
 
@@ -217,14 +220,30 @@ class WandbLogger(Logger):
         if not os.environ.get("WANDB_API_KEY"):
             raise ValueError("WANDB_API_KEY environment variable not set")
 
-        # Initialize wandb run
         assert wandb is not None  # For type checker
+
+        # Check for saved run ID to resume
+        resume_run_id: str | None = None
+        log_dir_path = Path(log_dir) if log_dir else None
+        if log_dir_path is not None:
+            run_id_file = log_dir_path / WANDB_RUN_ID_FILE
+            if run_id_file.exists():
+                resume_run_id = run_id_file.read_text().strip()
+                logger.info(f"Found existing wandb run ID: {resume_run_id}, will resume")
+
         self.run = wandb.init(
             project=project,
             config=dump_config(config) if config else None,
             dir=str(log_dir) if log_dir else None,
             name=wandb_name,
+            id=resume_run_id,
+            resume="must" if resume_run_id else None,
         )
+
+        # Persist run ID for future resumption
+        if log_dir_path is not None and self.run is not None:  # pyright: ignore[reportUnknownMemberType]
+            run_id_file = log_dir_path / WANDB_RUN_ID_FILE
+            run_id_file.write_text(self.run.id)  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType,reportUnusedCallResult]
 
     def log_hparams(self, config: Any) -> None:
         """Log hyperparameters to wandb."""

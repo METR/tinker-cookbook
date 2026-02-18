@@ -101,3 +101,8 @@ exclude = [
     # Vendored from HuggingFace, kept identical to upstream
     "kimi-k2.5-hf-tokenizer/tool_declaration_ts.py",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest-mock>=3.15.1",
+]
