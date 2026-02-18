@@ -51,7 +51,7 @@ class TestWandbRunIdPersistence:
         mock_wandb_module.init.assert_called_once()
         call_kwargs = mock_wandb_module.init.call_args[1]
         assert call_kwargs["id"] == "previous-run-id-xyz789"
-        assert call_kwargs["resume"] == "must"
+        assert call_kwargs["resume"] == "allow"
 
     def test_no_log_dir_skips_persistence(self, mock_wandb):
         """When log_dir is None, should not try to read/write run ID file."""

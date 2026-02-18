@@ -237,7 +237,7 @@ class WandbLogger(Logger):
             dir=str(log_dir) if log_dir else None,
             name=wandb_name,
             id=resume_run_id,
-            resume="must" if resume_run_id else None,
+            resume="allow" if resume_run_id else None,
         )
 
         # Persist run ID for future resumption
