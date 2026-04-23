@@ -3,27 +3,23 @@
 import json
 import re
 import warnings
-from dataclasses import dataclass, field
-from typing import Iterator
 
 import tinker
 import torch
 
+from tinker_cookbook.exceptions import RendererError
 from tinker_cookbook.renderers.base import (
+    ContentPart,
     Message,
-    MessageDelta,
     RenderContext,
     RenderedMessage,
     Renderer,
     Role,
-    StreamingMessageHeader,
-    StreamingTextDelta,
-    StreamingThinkingDelta,
+    TextPart,
     ToolCall,
     ToolSpec,
     TrainOnWhat,
     UnparsedToolCall,
-    Utf8TokenDecoder,
     ensure_list,
     ensure_text,
     parse_response_for_stop_token,
@@ -43,6 +39,15 @@ _TOOL_CALL_RE = re.compile(
 
 
 def _split_tool_calls_section(content: str) -> tuple[str, str | None]:
+    """Split content into text before tool calls and the tool calls section.
+
+    Args:
+        content (str): Raw response content that may contain tool call sections.
+
+    Returns:
+        tuple[str, str | None]: The text content before the tool calls section, and
+            the tool calls section content (or None if no tool calls found).
+    """
     match = _TOOL_CALLS_SECTION_RE.search(content)
     if not match:
         return content, None
@@ -51,6 +56,17 @@ def _split_tool_calls_section(content: str) -> tuple[str, str | None]:
 
 
 def _extract_tool_name(tool_id: str) -> str:
+    """Extract the tool function name from a Kimi K2 tool ID string.
+
+    Strips the ``functions.`` prefix and ``:index`` suffix from tool IDs
+    like ``functions.get_weather:0``.
+
+    Args:
+        tool_id (str): The tool identifier string.
+
+    Returns:
+        str: The extracted function name, or empty string if tool_id is empty.
+    """
     if not tool_id:
         return ""
     name_part = tool_id.split(":", 1)[0]
@@ -62,6 +78,15 @@ def _extract_tool_name(tool_id: str) -> str:
 def _parse_tool_calls_section(
     tool_section: str,
 ) -> tuple[list[ToolCall], list[UnparsedToolCall]]:
+    """Parse individual tool calls from a Kimi K2 tool calls section.
+
+    Args:
+        tool_section (str): The content inside the tool calls section markers.
+
+    Returns:
+        tuple[list[ToolCall], list[UnparsedToolCall]]: Successfully parsed tool calls
+            and any tool calls that failed to parse (e.g., invalid JSON arguments).
+    """
     tool_calls: list[ToolCall] = []
     unparsed_tool_calls: list[UnparsedToolCall] = []
 
@@ -87,255 +112,6 @@ def _parse_tool_calls_section(
     return tool_calls, unparsed_tool_calls
 
 
-# =============================================================================
-# Streaming Parser
-# =============================================================================
-
-# Tags we need to detect during streaming
-_THINK_OPEN_TAG = "<think>"
-_THINK_CLOSE_TAG = "</think>"
-
-
-def _longest_matching_suffix_prefix(text: str, tag: str) -> int:
-    """Find longest suffix of text that matches a prefix of tag.
-
-    This is used during streaming to determine how many characters at the end
-    of accumulated text might be the beginning of a tag, and thus shouldn't
-    be emitted yet.
-
-    Args:
-        text: The accumulated text to check.
-        tag: The tag we're looking for (e.g., "<think>").
-
-    Returns:
-        Length of the longest suffix of text that matches a prefix of tag.
-
-    Examples:
-        >>> _longest_matching_suffix_prefix("hello", "<think>")
-        0  # no suffix matches any prefix
-        >>> _longest_matching_suffix_prefix("hello<", "<think>")
-        1  # "<" matches prefix "<"
-        >>> _longest_matching_suffix_prefix("hello<th", "<think>")
-        3  # "<th" matches prefix "<th"
-        >>> _longest_matching_suffix_prefix("hello<thx", "<think>")
-        0  # "<thx" doesn't match any prefix of "<think>"
-    """
-    max_check = min(len(text), len(tag) - 1)  # -1 because full tag would be found, not buffered
-    for length in range(max_check, 0, -1):
-        if text.endswith(tag[:length]):
-            return length
-    return 0
-
-
-@dataclass
-class KimiK2StreamingParser:
-    """Stateful streaming parser for Kimi K2 model output.
-
-    Parses tokens incrementally, yielding deltas as content becomes available.
-    Handles UTF-8 token boundaries and <think>...</think> block transitions.
-
-    Usage:
-        parser = KimiK2StreamingParser(tokenizer, end_token)
-        for token in response_tokens:
-            for delta in parser.feed(token):
-                # Handle delta (StreamingMessageHeader, StreamingTextDelta, etc.)
-        for delta in parser.finish():
-            # Handle final deltas including complete Message
-    """
-
-    tokenizer: Tokenizer
-    end_message_token: int
-
-    # Internal state
-    _utf8_decoder: Utf8TokenDecoder = field(init=False)
-    _accumulated_text: str = field(init=False, default="")
-    _header_emitted: bool = field(init=False, default=False)
-    _in_thinking: bool = field(init=False, default=False)
-    _content_index: int = field(init=False, default=0)
-    _last_emitted_pos: int = field(init=False, default=0)
-    _finished: bool = field(init=False, default=False)
-    _all_tokens: list[int] = field(init=False, default_factory=list)
-
-    def __post_init__(self) -> None:
-        self._utf8_decoder = Utf8TokenDecoder(self.tokenizer)
-        self._accumulated_text = ""
-        self._header_emitted = False
-        self._in_thinking = False
-        self._content_index = 0
-        self._last_emitted_pos = 0
-        self._finished = False
-        self._all_tokens = []
-
-    def feed(self, token: int) -> Iterator[MessageDelta]:
-        """Feed a single token and yield any resulting deltas.
-
-        Args:
-            token: A single token ID from the model output.
-
-        Yields:
-            MessageDelta objects as content becomes available.
-        """
-        if self._finished:
-            return
-
-        self._all_tokens.append(token)
-
-        # Check for end token
-        if token == self.end_message_token:
-            self._finished = True
-            return
-
-        # Try to decode the token
-        decoded = self._utf8_decoder.decode([token])
-        if decoded is None:
-            # Token was buffered (incomplete UTF-8 sequence)
-            return
-
-        self._accumulated_text += decoded
-
-        # Emit header on first content
-        if not self._header_emitted:
-            self._header_emitted = True
-            yield StreamingMessageHeader(role="assistant")
-
-        # Process the new text for deltas
-        yield from self._emit_deltas()
-
-    def _emit_deltas(self) -> Iterator[MessageDelta]:
-        """Emit deltas for any new content since last emission."""
-        text = self._accumulated_text
-        pos = self._last_emitted_pos
-
-        while pos < len(text):
-            if not self._in_thinking:
-                # Look for <think> tag
-                think_start = text.find(_THINK_OPEN_TAG, pos)
-                if think_start == -1:
-                    # No <think> tag found - emit text up to a safe point.
-                    # Keep any trailing chars that could be the start of "<think>".
-                    suffix_from_pos = text[pos:]
-                    keep = _longest_matching_suffix_prefix(suffix_from_pos, _THINK_OPEN_TAG)
-                    safe_end = len(text) - keep
-                    if safe_end > pos:
-                        new_text = text[pos:safe_end]
-                        if new_text:
-                            yield StreamingTextDelta(
-                                text=new_text, content_index=self._content_index
-                            )
-                        self._last_emitted_pos = safe_end
-                    break
-                elif think_start > pos:
-                    # Emit text before <think>
-                    new_text = text[pos:think_start]
-                    if new_text:
-                        yield StreamingTextDelta(text=new_text, content_index=self._content_index)
-                    pos = think_start
-
-                if text[pos:].startswith(_THINK_OPEN_TAG):
-                    # Enter thinking mode
-                    self._in_thinking = True
-                    self._content_index += 1
-                    pos += len(_THINK_OPEN_TAG)
-                    self._last_emitted_pos = pos
-            else:
-                # In thinking mode - look for </think>
-                think_end = text.find(_THINK_CLOSE_TAG, pos)
-                if think_end == -1:
-                    # No </think> found - emit thinking up to safe point.
-                    # Keep any trailing chars that could be the start of "</think>".
-                    suffix_from_pos = text[pos:]
-                    keep = _longest_matching_suffix_prefix(suffix_from_pos, _THINK_CLOSE_TAG)
-                    safe_end = len(text) - keep
-                    if safe_end > pos:
-                        new_thinking = text[pos:safe_end]
-                        if new_thinking:
-                            yield StreamingThinkingDelta(
-                                thinking=new_thinking, content_index=self._content_index
-                            )
-                        self._last_emitted_pos = safe_end
-                    break
-                else:
-                    # Emit thinking before </think>
-                    new_thinking = text[pos:think_end]
-                    if new_thinking:
-                        yield StreamingThinkingDelta(
-                            thinking=new_thinking, content_index=self._content_index
-                        )
-                    # Exit thinking mode
-                    self._in_thinking = False
-                    self._content_index += 1
-                    pos = think_end + len(_THINK_CLOSE_TAG)
-                    self._last_emitted_pos = pos
-
-    def finish(self) -> Iterator[MessageDelta]:
-        """Finish parsing and yield any remaining content plus final Message.
-
-        Call this after all tokens have been fed (either naturally when
-        end_message_token is seen, or when the stream ends).
-
-        Yields:
-            Any remaining deltas and the complete Message.
-        """
-        # Flush any buffered UTF-8 tokens
-        remaining = self._utf8_decoder.flush()
-        if remaining:
-            self._accumulated_text += remaining
-
-        # Emit header if we haven't yet (empty response edge case)
-        if not self._header_emitted:
-            self._header_emitted = True
-            yield StreamingMessageHeader(role="assistant")
-
-        # Emit any remaining content
-        text = self._accumulated_text
-        pos = self._last_emitted_pos
-
-        if pos < len(text):
-            remaining_text = text[pos:]
-            if self._in_thinking:
-                # Unclosed thinking block - emit as thinking
-                if remaining_text:
-                    yield StreamingThinkingDelta(
-                        thinking=remaining_text, content_index=self._content_index
-                    )
-            else:
-                if remaining_text:
-                    yield StreamingTextDelta(text=remaining_text, content_index=self._content_index)
-
-        # Build and yield the final complete Message
-        # Use the batch parser for consistency
-        message, _success = parse_response_for_stop_token(
-            self._all_tokens, self.tokenizer, self.end_message_token
-        )
-
-        content = message.get("content", "")
-        if isinstance(content, str):
-            # Handle tool calls if present
-            text_content, tool_section = _split_tool_calls_section(content)
-            if tool_section is not None:
-                tool_calls, unparsed_tool_calls = _parse_tool_calls_section(tool_section)
-                if tool_calls:
-                    message["tool_calls"] = tool_calls
-                if unparsed_tool_calls:
-                    message["unparsed_tool_calls"] = unparsed_tool_calls
-
-            content_parts = parse_think_blocks(text_content)
-            message["content"] = content_parts if content_parts is not None else text_content
-
-        yield message
-
-    def reset(self) -> None:
-        """Reset parser state for reuse."""
-        self._utf8_decoder.reset()
-        self._accumulated_text = ""
-        self._header_emitted = False
-        self._in_thinking = False
-        self._content_index = 0
-        self._last_emitted_pos = 0
-        self._finished = False
-        self._all_tokens = []
-
-
 class KimiK2Renderer(Renderer):
     """
     Format for moonshotai/Kimi-K2-Thinking:
@@ -351,7 +127,21 @@ class KimiK2Renderer(Renderer):
     using HF's apply_chat_template for inference.
     """
 
+    supports_streaming = True
+
     DEFAULT_SYSTEM_PROMPT = "You are Kimi, an AI assistant created by Moonshot AI."
+
+    def __init__(self, tokenizer: Tokenizer, strip_thinking_from_history: bool = True):
+        """Initialize the Kimi K2 renderer.
+
+        Args:
+            tokenizer (Tokenizer): The tokenizer to use for encoding.
+            strip_thinking_from_history (bool): When True (default), replaces thinking
+                content with empty ``<think></think>`` in historical assistant messages.
+                Set to False to preserve thinking in history for multi-turn RL.
+        """
+        super().__init__(tokenizer)
+        self.strip_thinking_from_history = strip_thinking_from_history
 
     def _ensure_system_message(self, messages: list[Message]) -> list[Message]:
         """Ensure a default system message is present if none exists.
@@ -384,9 +174,19 @@ class KimiK2Renderer(Renderer):
         return messages
 
     def render_message(self, message: Message, ctx: RenderContext) -> RenderedMessage:
-        """
-        Render a message. For assistant messages, ctx.is_last controls whether thinking is preserved
-        (True) or stripped to empty <think></think> (False).
+        """Render a chat message into Kimi K2 ``<|im_*|>`` token format.
+
+        Each message uses role-specific tokens (``<|im_user|>``, ``<|im_assistant|>``,
+        ``<|im_system|>``) with ``<|im_middle|>`` separating the role from content.
+        For assistant messages, ``ctx.is_last`` controls whether thinking is preserved
+        or replaced with empty ``<think></think>``.
+
+        Args:
+            message (Message): The chat message to render.
+            ctx (RenderContext): Positional context including index and is_last flag.
+
+        Returns:
+            RenderedMessage: Header and output token chunks for the message.
         """
         role = message["role"]
 
@@ -429,23 +229,25 @@ class KimiK2Renderer(Renderer):
             header_str = f"<|im_system|>{role}<|im_middle|>"
 
         # Build output content
-        output_str = ""
+        content = message["content"]
+        output: list[tinker.ModelInputChunk] = []
         if role == "assistant":
+            output_str = ""
             # Extract thinking and text from content list
-            parts = ensure_list(message["content"])
+            parts = ensure_list(content)
             thinking_content = "".join(p["thinking"] for p in parts if p["type"] == "thinking")
             text_content = "".join(p["text"] for p in parts if p["type"] == "text")
 
-            # Preserve thinking only for the suffix after the last non-tool-call assistant.
-            # Note: is_last might not be unique as it captures all assistant messages after the last non-tool-call assistant message
-            if ctx.is_last and thinking_content:
+            # Preserve thinking for the last assistant message, or for all messages
+            # when strip_thinking_from_history is False.
+            if (ctx.is_last or not self.strip_thinking_from_history) and thinking_content:
                 output_str = f"<think>{thinking_content}</think>"
             else:
                 output_str = "<think></think>"
             output_str += text_content
 
             # Handle tool calls
-            if "tool_calls" in message and message["tool_calls"]:
+            if "tool_calls" in message and message["tool_calls"]:  # noqa: RUF019
                 output_str += "<|tool_calls_section_begin|>"
                 for idx, tool_call in enumerate(message["tool_calls"]):
                     tool_id = tool_call.id
@@ -454,20 +256,45 @@ class KimiK2Renderer(Renderer):
                     args = tool_call.function.arguments
                     output_str += f"<|tool_call_begin|>{tool_id}<|tool_call_argument_begin|>{args}<|tool_call_end|>"
                 output_str += "<|tool_calls_section_end|>"
+            output_str += "<|im_end|>"
+            output.append(tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(output_str)))
+        elif isinstance(content, str) or (len(content) == 1 and content[0]["type"] == "text"):
+            # Single-part/text content
+            output_str = ensure_text(content) + "<|im_end|>"
+            output.append(tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(output_str)))
         else:
-            output_str = ensure_text(message["content"])
-
-        output_str += "<|im_end|>"
+            # Mult-part content (e.g. text+image(s))
+            assert isinstance(content, list), f"Expected list of content parts, got {type(content)}"
+            output = self._encode_multipart_content(
+                content + [TextPart(type="text", text="<|im_end|>")]
+            )
 
         header = tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(header_str))
-        output: list[tinker.ModelInputChunk] = [
-            tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(output_str))
-        ]
+
         return RenderedMessage(header=header, output=output)
+
+    def _encode_multipart_content(self, content: list[ContentPart]) -> list[tinker.ModelInputChunk]:
+        raise NotImplementedError(
+            "Multipart/Image content encoding is not supported for Kimi K2 renderer"
+        )
 
     def build_generation_prompt(
         self, messages: list[Message], role: Role = "assistant", prefill: str | None = None
     ) -> tinker.ModelInput:
+        """Build a generation prompt with Kimi K2 formatting.
+
+        Ensures a default system message is present, renders all messages, and
+        appends the assistant generation header. Preserves thinking for assistant
+        messages after the last non-tool-call assistant message.
+
+        Args:
+            messages (list[Message]): The conversation messages.
+            role (Role): The role for the generation prompt (default "assistant").
+            prefill (str | None): Optional prefill text to append after the prompt header.
+
+        Returns:
+            tinker.ModelInput: The tokenized model input ready for sampling.
+        """
         messages = self._ensure_system_message(messages)
         chunks: list[tinker.types.ModelInputChunk] = []
 
@@ -510,8 +337,22 @@ class KimiK2Renderer(Renderer):
         messages: list[Message],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_TURN,
     ) -> list[tuple[tinker.ModelInput, torch.Tensor]]:
-        """
-        Build tokens and per-token weights for supervised fine-tuning. Since Kimi K2 renderer does not satisfy the extension property, this method is provided to return multiple examples in case we want to train on multiple assistant messages, potentially across multiple turns of user-assistant conversation.
+        """Build multiple supervised examples for multi-turn conversations.
+
+        Since Kimi K2 does not satisfy the extension property (thinking is stripped
+        from history), this method splits multi-turn conversations into separate
+        training examples -- one per user turn -- to avoid training on incorrect
+        token sequences.
+
+        Args:
+            messages (list[Message]): The full conversation messages.
+            train_on_what (TrainOnWhat): Which message tokens to assign training weight.
+                For LAST_ASSISTANT_MESSAGE or LAST_ASSISTANT_TURN, delegates to
+                build_supervised_example directly.
+
+        Returns:
+            list[tuple[tinker.ModelInput, torch.Tensor]]: A list of (model_input, weights)
+                pairs, one per training example.
         """
 
         if (
@@ -557,9 +398,19 @@ class KimiK2Renderer(Renderer):
         messages: list[Message],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     ) -> tuple[tinker.ModelInput, torch.Tensor]:
-        """
-        Override to properly handle thinking preservation for the last assistant message.
-        Also ensures default system message is prepended if none is present.
+        """Build a single supervised training example with proper thinking preservation.
+
+        Ensures a default system message is present and preserves thinking content
+        for assistant messages in the last assistant turn (after the last non-tool-call
+        assistant message).
+
+        Args:
+            messages (list[Message]): The conversation messages for supervised training.
+            train_on_what (TrainOnWhat): Which message tokens to assign training weight.
+
+        Returns:
+            tuple[tinker.ModelInput, torch.Tensor]: The tokenized model input and
+                per-token weight tensor.
         """
         messages = self._ensure_system_message(messages)
 
@@ -628,7 +479,7 @@ class KimiK2Renderer(Renderer):
                 case TrainOnWhat.CUSTOMIZED:
                     output_has_weight = message.get("trainable", False)
                 case _:
-                    raise ValueError(f"Unknown train_on_what: {train_on_what}")
+                    raise RendererError(f"Unknown train_on_what: {train_on_what}")
 
             model_input_chunks_weights += [
                 (output_part, int(output_has_weight)) for output_part in output_parts if output_part
@@ -647,9 +498,28 @@ class KimiK2Renderer(Renderer):
         return tokens[0]
 
     def get_stop_sequences(self) -> list[int]:
+        """Return stop sequences for Kimi K2 generation.
+
+        Returns:
+            list[int]: Single-element list containing the ``<|im_end|>`` token ID.
+        """
         return [self._end_message_token]
 
     def parse_response(self, response: list[int]) -> tuple[Message, bool]:
+        """Parse sampled token IDs back into an assistant Message.
+
+        Normalizes response tokens, strips the ``<|im_end|>`` stop token, and parses
+        ``<think>...</think>`` blocks and Kimi K2 tool call sections into structured
+        content and ToolCall objects.
+
+        Args:
+            response (list[int]): Raw token IDs from the sampler.
+
+        Returns:
+            tuple[Message, bool]: The parsed assistant message (with structured content
+                and optional tool_calls) and whether the stop token was found.
+        """
+        response = self._normalize_response_tokens(response)
         assistant_message, parse_success = parse_response_for_stop_token(
             response, self.tokenizer, self._end_message_token
         )
@@ -673,42 +543,32 @@ class KimiK2Renderer(Renderer):
 
         return assistant_message, True
 
-    def parse_response_streaming(self, response: list[int]) -> Iterator[MessageDelta]:
-        """Parse response tokens with streaming, yielding incremental deltas.
+    def _parse_response_for_streaming(self, response: list[int]) -> tuple[Message, bool]:
+        """Parse response for streaming, always applying full content parsing.
 
-        This method enables real-time display of model output by yielding
-        partial content as it becomes available, rather than waiting for
-        the complete response.
-
-        Args:
-            response: Token IDs from the model.
-
-        Yields:
-            StreamingMessageHeader: Once at the start of the message.
-            StreamingTextDelta: Incremental text content.
-            StreamingThinkingDelta: Incremental thinking content.
-            Message: The complete parsed message at the end.
-
-        Example:
-            for delta in renderer.parse_response_streaming(tokens):
-                if isinstance(delta, StreamingMessageHeader):
-                    print(f"New message from {delta.role}")
-                elif isinstance(delta, StreamingThinkingDelta):
-                    print(f"[thinking] {delta.thinking}", end="")
-                elif isinstance(delta, StreamingTextDelta):
-                    print(delta.text, end="")
-                elif isinstance(delta, Message):
-                    print(f"\\nComplete: {delta}")
+        Unlike parse_response which short-circuits on missing stop token,
+        this always parses think blocks and tool calls from the content.
+        This matches the original KimiK2StreamingParser.finish() behavior
+        where content parsing was applied regardless of stop token presence.
         """
-        parser = KimiK2StreamingParser(
-            tokenizer=self.tokenizer,
-            end_message_token=self._end_message_token,
+        message, parse_success = parse_response_for_stop_token(
+            response, self.tokenizer, self._end_message_token
         )
 
-        for token in response:
-            yield from parser.feed(token)
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text_content, tool_section = _split_tool_calls_section(content)
+            if tool_section is not None:
+                tool_calls, unparsed_tool_calls = _parse_tool_calls_section(tool_section)
+                if tool_calls:
+                    message["tool_calls"] = tool_calls
+                if unparsed_tool_calls:
+                    message["unparsed_tool_calls"] = unparsed_tool_calls
 
-        yield from parser.finish()
+            content_parts = parse_think_blocks(text_content)
+            message["content"] = content_parts if content_parts is not None else text_content
+
+        return message, parse_success
 
     def to_openai_message(self, message: Message) -> dict:
         """Convert a Message to OpenAI API format with reasoning_content for thinking.
@@ -735,7 +595,7 @@ class KimiK2Renderer(Renderer):
                 result["reasoning_content"] = "".join(thinking_parts)
 
         # Handle tool_calls
-        if "tool_calls" in message and message["tool_calls"]:
+        if "tool_calls" in message and message["tool_calls"]:  # noqa: RUF019
             result["tool_calls"] = [
                 {
                     "type": "function",

@@ -9,6 +9,7 @@ import time
 import chz
 import datasets
 import tinker
+
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.supervised.common import compute_mean_nll
 from tinker_cookbook.supervised.data import conversation_to_datum
@@ -30,7 +31,7 @@ class Config:
     train_on_what: renderers.TrainOnWhat = renderers.TrainOnWhat.ALL_ASSISTANT_MESSAGES
     lora_rank: int = 32
     save_every: int = 20  # 0 = disabled
-    ttl_seconds: int = 604800  # 7 days
+    ttl_seconds: int | None = 604800  # 7 days
 
 
 def main(config: Config):
@@ -55,7 +56,14 @@ def main(config: Config):
     assert isinstance(dataset, datasets.DatasetDict)
     train_dataset = dataset["train"]
 
+    # Drop the last incomplete batch (like PyTorch's drop_last=True) — a partial
+    # batch has different effective gradient magnitude, which can cause a training spike.
     n_train_batches = len(train_dataset) // config.batch_size
+    n_dropped = len(train_dataset) % config.batch_size
+    if n_dropped:
+        logger.info(
+            f"Dropping last {n_dropped} examples to keep batch size uniform at {config.batch_size}"
+        )
     logger.info(f"Train batches: {n_train_batches}")
 
     # Setup training client
@@ -65,9 +73,9 @@ def main(config: Config):
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
         training_client = service_client.create_training_client_from_state_with_optimizer(
-            resume_info["state_path"]
+            resume_info.state_path
         )
-        start_batch = resume_info["batch"]
+        start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:
         training_client = service_client.create_lora_training_client(
@@ -150,7 +158,7 @@ def main(config: Config):
         log_path=config.log_path,
         kind="both",
         loop_state={"batch": n_train_batches},
-        ttl_seconds=config.ttl_seconds,
+        ttl_seconds=None,
     )
 
     ml_logger.close()

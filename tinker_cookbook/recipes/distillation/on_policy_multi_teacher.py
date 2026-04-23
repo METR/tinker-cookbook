@@ -19,13 +19,14 @@ Example usage:
 
 import asyncio
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import chz
 from tinker.types import LossFnType
-from tinker_cookbook import cli_utils
+
+from tinker_cookbook import checkpoint_utils, cli_utils
 from tinker_cookbook.distillation import train_on_policy
 from tinker_cookbook.distillation.datasets import (
     DistillationDatasetConfig,
@@ -43,7 +44,7 @@ class CLIConfig:
     # Model configuration
     model_name: str = "Qwen/Qwen3-8B"  # Student model
     lora_rank: int = 128
-    renderer_name: str = "qwen3_instruct"
+    renderer_name: str | None = None
     load_checkpoint_path: str | None = None  # Student checkpoint
 
     # Teacher configurations
@@ -87,9 +88,17 @@ class CLIConfig:
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
+    max_steps: int | None = None
+
 
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
+    renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
+        model_name=cli_config.model_name,
+        explicit_renderer_name=cli_config.renderer_name,
+        load_checkpoint_path=cli_config.load_checkpoint_path,
+        base_url=cli_config.base_url,
+    )
 
     # Create log path if not specified
     if cli_config.log_path is not None:
@@ -102,13 +111,13 @@ async def cli_main(cli_config: CLIConfig):
             f"dm{cli_config.deepmath_groups_per_batch}-t3{cli_config.tulu3_groups_per_batch}-"
             f"{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
-        log_path = os.path.expanduser(f"~/tinker-examples/distillation/{run_name}")
+        log_path = f"/tmp/tinker-examples/distillation/{run_name}"
 
     # Create wandb name if not specified
     if cli_config.wandb_name is not None:
         wandb_name = cli_config.wandb_name
     else:
-        wandb_name = os.path.basename(log_path)
+        wandb_name = Path(log_path).name
 
     # Create DeepMath dataset builder
     deepmath_builder = PromptOnlyDatasetBuilder(
@@ -116,7 +125,7 @@ async def cli_main(cli_config: CLIConfig):
         groups_per_batch=cli_config.deepmath_groups_per_batch,
         group_size=cli_config.group_size,
         model_name_for_tokenizer=cli_config.model_name,
-        renderer_name=cli_config.renderer_name,
+        renderer_name=renderer_name,
     )
 
     # Create Tulu3 dataset builder
@@ -125,7 +134,7 @@ async def cli_main(cli_config: CLIConfig):
         groups_per_batch=cli_config.tulu3_groups_per_batch,
         group_size=cli_config.group_size,
         model_name_for_tokenizer=cli_config.model_name,
-        renderer_name=cli_config.renderer_name,
+        renderer_name=renderer_name,
     )
 
     # Create teacher configs
@@ -157,6 +166,7 @@ async def cli_main(cli_config: CLIConfig):
         learning_rate=cli_config.learning_rate,
         dataset_configs=[deepmath_dataset_config, tulu3_dataset_config],
         model_name=cli_config.model_name,
+        renderer_name=renderer_name,
         lora_rank=cli_config.lora_rank,
         max_tokens=cli_config.max_tokens,
         kl_penalty_coef=cli_config.kl_penalty_coef,
@@ -172,6 +182,7 @@ async def cli_main(cli_config: CLIConfig):
         compute_post_kl=cli_config.compute_post_kl,
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
+        max_steps=cli_config.max_steps,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)

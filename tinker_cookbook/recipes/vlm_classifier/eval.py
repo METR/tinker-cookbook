@@ -1,22 +1,21 @@
 import asyncio
-import logging
-from typing import TypedDict, Any, cast
-from PIL import Image
-
-import datasets
-import chz
 import io
+import logging
+from typing import Any, TypedDict, cast
 
+import chz
+import datasets
 import numpy as np
 import tinker
+from PIL import Image
 from tinker import types
-from tinker_cookbook import renderers
-from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, EvaluatorBuilder
-from tinker_cookbook.tokenizer_utils import get_tokenizer
-from tinker_cookbook.image_processing_utils import get_image_processor, resize_image
-from tinker_cookbook.renderers import Message, ImagePart, TextPart, get_text_content
-from tinker_cookbook.utils.misc_utils import timed
 
+from tinker_cookbook import checkpoint_utils, model_info, renderers
+from tinker_cookbook.eval.evaluators import EvaluatorBuilder, SamplingClientEvaluator
+from tinker_cookbook.image_processing_utils import get_image_processor, resize_image
+from tinker_cookbook.renderers import ImagePart, Message, TextPart, get_text_content
+from tinker_cookbook.tokenizer_utils import get_tokenizer
+from tinker_cookbook.utils.misc_utils import timed
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -228,7 +227,7 @@ class ClassifierEvaluator(SamplingClientEvaluator):
         # aggregate the performance metrics
         aggregated_metrics = {
             key: np.mean([example[key] for example in metrics_per_example]).item()
-            for key in metrics_per_example[0].keys()
+            for key in metrics_per_example[0]
         }
 
         return aggregated_metrics
@@ -436,8 +435,8 @@ class EvalConfig:
     dataset: str
     model_path: str
 
-    renderer_name: str = "qwen3_vl"
-    model_name: str = "Qwen/Qwen3-VL-235B-A22B-Instruct"
+    renderer_name: str | None = None
+    model_name: str | None = None
 
     # Infrastructure parameters
     base_url: str | None = None
@@ -461,10 +460,25 @@ def run_eval(eval_config: EvalConfig):
     service_client = tinker.ServiceClient(base_url=eval_config.base_url)
     sampling_client = service_client.create_sampling_client(model_path=eval_config.model_path)
 
+    rest_client = service_client.create_rest_client()
+    training_run = rest_client.get_training_run_by_tinker_path(eval_config.model_path).result()
+    if eval_config.model_name is not None and eval_config.model_name != training_run.base_model:
+        raise ValueError(
+            f"Model name {eval_config.model_name} does not match training run base model {training_run.base_model}"
+        )
+    model_name = eval_config.model_name or training_run.base_model
+    renderer_name = eval_config.renderer_name or checkpoint_utils.get_renderer_name_from_checkpoint(
+        service_client, eval_config.model_path
+    )
+    if renderer_name is None:
+        renderer_name = model_info.get_recommended_renderer_name(model_name)
+    logger.info(f"Using model: {model_name}")
+    logger.info(f"Using renderer: {renderer_name}")
+
     evaluator_builder = get_evaluator_builder(
         dataset=eval_config.dataset,
-        model_name_for_tokenizer=eval_config.model_name,
-        renderer_name=eval_config.renderer_name,
+        model_name_for_tokenizer=model_name,
+        renderer_name=renderer_name,
         temperature=eval_config.temperature,
         max_tokens=eval_config.max_tokens,
         top_p=eval_config.top_p,

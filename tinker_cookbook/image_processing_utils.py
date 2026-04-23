@@ -7,6 +7,7 @@ Avoid importing AutoImageProcessor and BaseImageProcessor until runtime, because
 
 from __future__ import annotations
 
+import os
 from functools import cache
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -28,8 +29,19 @@ def get_image_processor(model_name: str) -> ImageProcessor:
 
     from transformers.models.auto.image_processing_auto import AutoImageProcessor
 
-    processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
-    assert processor.is_fast, f"Could not load fast image processor for {model_name}"
+    kwargs: dict[str, Any] = {}
+    if os.environ.get("HF_TRUST_REMOTE_CODE", "").lower() in ("1", "true", "yes"):
+        kwargs["trust_remote_code"] = True
+
+    if model_name == "moonshotai/Kimi-K2.5":
+        kwargs["trust_remote_code"] = True
+        kwargs["revision"] = "3367c8d1c68584429fab7faf845a32d5195b6ac1"
+    elif model_name == "moonshotai/Kimi-K2.6":
+        kwargs["trust_remote_code"] = True
+        kwargs["revision"] = "2b2b88e33c96d813ebb4c83a740252fe08018e3a"
+
+    processor = AutoImageProcessor.from_pretrained(model_name, **kwargs)
+
     return processor
 
 

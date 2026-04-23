@@ -20,8 +20,9 @@ import datasets
 import tinker
 import torch
 from tinker import types
-from tqdm import tqdm
 from tinker.types.tensor_data import TensorData
+from tqdm import tqdm
+
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.recipes.math_rl.math_env import extract_gsm8k_final_answer
 from tinker_cookbook.recipes.math_rl.math_grading import extract_boxed, grade_answer
@@ -43,7 +44,7 @@ class Config:
     lora_rank: int = 32
     save_every: int = 20  # 0 = disabled
     max_tokens: int = 256
-    ttl_seconds: int = 604800  # 7 days
+    ttl_seconds: int | None = 604800  # 7 days
 
 
 def get_reward(response: str, answer: str) -> float:
@@ -98,9 +99,9 @@ def main(config: Config):
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
         training_client = service_client.create_training_client_from_state_with_optimizer(
-            resume_info["state_path"]
+            resume_info.state_path
         )
-        start_batch = resume_info["batch"]
+        start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:
         training_client = service_client.create_lora_training_client(
@@ -144,14 +145,7 @@ def main(config: Config):
         batch_end = min((batch_idx + 1) * config.batch_size, len(train_dataset))
         batch_rows = train_dataset.select(range(batch_start, batch_end))
 
-        sampling_path = (
-            training_client.save_weights_for_sampler(
-                name=f"{batch_idx:06d}", ttl_seconds=config.ttl_seconds
-            )
-            .result()
-            .path
-        )
-        sampling_client = service_client.create_sampling_client(model_path=sampling_path)
+        sampling_client = training_client.save_weights_and_get_sampling_client()
 
         datums_D: list[types.Datum] = []
         rewards_P: list[float] = []
@@ -232,13 +226,18 @@ def main(config: Config):
                 datums_D.append(datum)
 
         # Training step
-        fwd_bwd_future = training_client.forward_backward(datums_D, loss_fn="importance_sampling")
-        optim_step_future = training_client.optim_step(adam_params)
-        _fwd_bwd_result = fwd_bwd_future.result()
-        optim_result = optim_step_future.result()
+        if len(datums_D) == 0:
+            logger.warning("Batch %d: all advantages zero, skipping training step", batch_idx)
+        else:
+            fwd_bwd_future = training_client.forward_backward(
+                datums_D, loss_fn="importance_sampling"
+            )
+            optim_step_future = training_client.optim_step(adam_params)
+            _fwd_bwd_result = fwd_bwd_future.result()
+            optim_result = optim_step_future.result()
 
-        if optim_result.metrics:
-            metrics.update(optim_result.metrics)
+            if optim_result.metrics:
+                metrics.update(optim_result.metrics)
 
         # Log metrics
         metrics["time/total"] = time.time() - t_start
@@ -252,7 +251,7 @@ def main(config: Config):
         log_path=config.log_path,
         kind="both",
         loop_state={"batch": n_train_batches},
-        ttl_seconds=config.ttl_seconds,
+        ttl_seconds=None,
     )
     ml_logger.close()
     logger.info("Training completed")

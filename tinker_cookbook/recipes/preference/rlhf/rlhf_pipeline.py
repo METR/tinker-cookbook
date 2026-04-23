@@ -1,8 +1,9 @@
 import asyncio
 import logging
-import os
+from pathlib import Path
 
 import chz
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.preference.comparison_policy_evaluator import ComparisonEvaluator
 from tinker_cookbook.preference.preference_datasets import ChatDatasetBuilderFromComparisons
@@ -42,6 +43,8 @@ class CLIConfig:
     # Logtree configuration - number of groups to log per iteration (0 = disable)
     num_groups_to_log: int = 4
 
+    max_steps: int | None = None
+
 
 def sft_stage(
     log_path: str,
@@ -54,6 +57,7 @@ def sft_stage(
     max_length: int,
     save_every: int,
     eval_every: int,
+    max_steps: int | None = None,
 ):
     """
     Train base policy on NoRobots dataset
@@ -77,6 +81,7 @@ def sft_stage(
     config = supervised_train.Config(
         log_path=log_path,
         model_name=base_model,
+        renderer_name=renderer_name,
         dataset_builder=dataset_builder,
         evaluator_builders=[],  # Could add evaluators here
         num_epochs=1,
@@ -87,6 +92,7 @@ def sft_stage(
         lora_rank=lora_rank,
         wandb_project=wandb_project,
         wandb_name=f"{wandb_name}-sft",
+        max_steps=max_steps,
     )
 
     # Run training
@@ -104,6 +110,7 @@ def train_rm(
     max_length: int,
     save_every: int,
     eval_every: int,
+    max_steps: int | None = None,
 ):
     """Train reward model using Anthropic HHH preference comparisons."""
     # Use HHH comparison builder for Anthropic data
@@ -129,6 +136,7 @@ def train_rm(
     config = supervised_train.Config(
         log_path=log_path,
         model_name=base_model,
+        renderer_name=renderer_name,
         dataset_builder=dataset_builder,
         evaluator_builders=[],  # Could add evaluators here
         num_epochs=1,
@@ -139,6 +147,7 @@ def train_rm(
         lora_rank=lora_rank,
         wandb_project=wandb_project,
         wandb_name=f"{wandb_name}-rm",
+        max_steps=max_steps,
     )
 
     # Run training
@@ -160,6 +169,7 @@ async def train_rl(
     save_every: int,
     eval_every: int,
     num_groups_to_log: int = 4,
+    max_steps: int | None = None,
 ):
     """Train policy using RL with prompts from Anthropic HHH data."""
     # Get checkpoints from previous stages
@@ -171,8 +181,8 @@ async def train_rl(
     if rm_checkpoint_dict is None:
         raise ValueError(f"No RM checkpoint found in {rm_log_path}")
 
-    sft_checkpoint = sft_checkpoint_dict["state_path"]
-    rm_weights_path = rm_checkpoint_dict["sampler_path"]
+    sft_checkpoint = sft_checkpoint_dict.state_path
+    rm_weights_path = rm_checkpoint_dict.sampler_path
 
     # Use HHH comparison builder for prompts
     comparison_builder = HHHComparisonBuilder()
@@ -212,6 +222,7 @@ async def train_rl(
 
     config = train.Config(
         model_name=base_model,
+        renderer_name=renderer_name,
         dataset_builder=rl_dataset_builder,
         load_checkpoint_path=sft_checkpoint,
         learning_rate=learning_rate,
@@ -224,15 +235,16 @@ async def train_rl(
         save_every=save_every,
         eval_every=eval_every,
         num_groups_to_log=num_groups_to_log,
+        max_steps=max_steps,
     )
     await train.main(config)
 
 
 def cli_main(cli_config: CLIConfig):
-    log_path_root = os.path.expanduser(f"~/experiments/rlhf-{cli_config.short_name}")
-    sft_log_path = os.path.join(log_path_root, "sft")
-    rm_log_path = os.path.join(log_path_root, "rm")
-    rl_log_path = os.path.join(log_path_root, "rl")
+    log_path_root = Path(f"/tmp/tinker-examples/rlhf-{cli_config.short_name}")
+    sft_log_path = str(log_path_root / "sft")
+    rm_log_path = str(log_path_root / "rm")
+    rl_log_path = str(log_path_root / "rl")
     if cli_config.run_sft:
         sft_stage(
             sft_log_path,
@@ -245,6 +257,7 @@ def cli_main(cli_config: CLIConfig):
             cli_config.max_length,
             cli_config.save_every,
             cli_config.eval_every,
+            max_steps=cli_config.max_steps,
         )
     if cli_config.run_rm:
         train_rm(
@@ -258,6 +271,7 @@ def cli_main(cli_config: CLIConfig):
             cli_config.max_length,
             cli_config.save_every,
             cli_config.eval_every,
+            max_steps=cli_config.max_steps,
         )
     if cli_config.run_rl:
         asyncio.run(
@@ -276,6 +290,7 @@ def cli_main(cli_config: CLIConfig):
                 cli_config.save_every,
                 cli_config.eval_every,
                 cli_config.num_groups_to_log,
+                max_steps=cli_config.max_steps,
             )
         )
 

@@ -10,19 +10,19 @@ python -m tinker_cookbook.recipes.vlm_classifier.train experiment_dir=./vlm_clas
 
 """
 
-import os
-
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 import chz
-from tinker_cookbook.renderers import TrainOnWhat
-from tinker_cookbook.utils.lr_scheduling import LRSchedule
+
 from tinker_cookbook import cli_utils
-from tinker_cookbook.recipes.vlm_classifier.eval import get_evaluator_builder
 from tinker_cookbook.recipes.vlm_classifier.data import get_dataset_builder
+from tinker_cookbook.recipes.vlm_classifier.eval import get_evaluator_builder
+from tinker_cookbook.renderers import TrainOnWhat
 from tinker_cookbook.supervised import train
+from tinker_cookbook.utils.lr_scheduling import LRSchedule
 
 
 @chz.chz
@@ -79,6 +79,8 @@ class ExperimentConfig:
 
     n_eval: int = 128
 
+    max_steps: int | None = None
+
 
 def run_experiment(experiment_config: ExperimentConfig):
     """
@@ -97,7 +99,7 @@ def run_experiment(experiment_config: ExperimentConfig):
     )
     experiment_name = f"{experiment_config.dataset}-{model_name}-{experiment_config.lora_rank}rank-{experiment_config.learning_rate}lr-{experiment_config.batch_size}batch{shot_suffix}-{date_and_time}"
 
-    experiment_path = os.path.join(experiment_config.experiment_dir, experiment_name)
+    experiment_path = str(Path(experiment_config.experiment_dir) / experiment_name)
     cli_utils.check_log_dir(
         experiment_path, behavior_if_exists=experiment_config.behavior_if_log_dir_exists
     )
@@ -133,6 +135,7 @@ def run_experiment(experiment_config: ExperimentConfig):
     config = train.Config(
         log_path=experiment_path,
         model_name=experiment_config.model_name,
+        renderer_name=experiment_config.renderer_name,
         load_checkpoint_path=experiment_config.load_checkpoint_path,
         dataset_builder=dataset_builder,
         evaluator_builders=evaluator_builders,
@@ -147,10 +150,12 @@ def run_experiment(experiment_config: ExperimentConfig):
         save_every=experiment_config.save_every,
         eval_every=experiment_config.eval_every,
         infrequent_eval_every=experiment_config.infrequent_eval_every,
+        max_steps=experiment_config.max_steps,
     )
 
     asyncio.run(train.main(config))
 
 
 if __name__ == "__main__":
-    chz.nested_entrypoint(run_experiment)
+    experiment_config = chz.entrypoint(ExperimentConfig)
+    run_experiment(experiment_config)

@@ -8,9 +8,12 @@ Includes:
 
 import json
 import re
+import warnings
 
 import tinker
+import transformers
 
+from tinker_cookbook.exceptions import RendererError
 from tinker_cookbook.renderers.base import (
     Message,
     RenderContext,
@@ -41,15 +44,37 @@ class _DeepSeekV3BaseRenderer(Renderer):
     Use strip_thinking_from_history=False for multi-turn RL to get the extension property.
     """
 
+    supports_streaming = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
         system_role_as_user: bool = False,
         strip_thinking_from_history: bool = True,
     ):
+        """Initialize the DeepSeek V3 base renderer.
+
+        Args:
+            tokenizer (Tokenizer): The tokenizer to use for encoding.
+            system_role_as_user (bool): When True, converts system messages at
+                non-zero positions to user role. Required for multi-system-message
+                conversations.
+            strip_thinking_from_history (bool): When True (default), strips thinking
+                traces from historical assistant messages. Set to False for multi-turn
+                RL to preserve the extension property.
+        """
         super().__init__(tokenizer)
         self.system_role_as_user = system_role_as_user
         self.strip_thinking_from_history = strip_thinking_from_history
+
+        if transformers.__version__ == "5.3.0":
+            warnings.warn(
+                "transformers 5.3.0 has a known bug with the DeepSeek tokenizer that "
+                "strips spaces during decode, which will produce incorrect outputs. "
+                "Please upgrade to transformers>=5.3.1 or downgrade to transformers<5.3.0. "
+                "See https://github.com/huggingface/transformers/pull/44801",
+                stacklevel=2,
+            )
 
     @property
     def has_extension_property(self) -> bool:
@@ -91,7 +116,7 @@ class _DeepSeekV3BaseRenderer(Renderer):
                 header_tokens = [role_token]
                 output_str = content_str
             else:
-                raise ValueError(
+                raise RendererError(
                     "DeepSeek only supports system message at start. "
                     "Use system_role_as_user=True to convert later system messages to user role."
                 )
@@ -145,11 +170,11 @@ class _DeepSeekV3BaseRenderer(Renderer):
             )
             output_str = ensure_text(content) + "<｜tool▁output▁end｜>"
         else:
-            raise ValueError(f"Unsupported role: {message['role']}")
+            raise RendererError(f"Unsupported role: {message['role']}")
 
         # Handle tool calls in assistant messages
         # HF format: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>name<｜tool▁sep｜>args<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-        if "tool_calls" in message and message["tool_calls"]:
+        if "tool_calls" in message and message["tool_calls"]:  # noqa: RUF019
             output_str += "<｜tool▁calls▁begin｜>"
             for tool_call in message["tool_calls"]:
                 func_name = tool_call.function.name
@@ -192,6 +217,11 @@ class _DeepSeekV3BaseRenderer(Renderer):
         return self._get_special_token("end▁of▁sentence")
 
     def get_stop_sequences(self) -> list[int]:
+        """Return stop sequences for DeepSeek V3 generation.
+
+        Returns:
+            list[int]: Single-element list containing the end-of-sentence token ID.
+        """
         return [self._end_message_token]
 
     def _parse_deepseek_tool_calls(
@@ -237,11 +267,18 @@ class _DeepSeekV3BaseRenderer(Renderer):
 
         return tool_calls, unparsed_tool_calls
 
-    def parse_response(self, response: list[int]) -> tuple[Message, bool]:
+    def _parse_response_content(
+        self, response: list[int], *, allow_missing_stop: bool = False
+    ) -> tuple[Message, bool]:
+        """Shared parsing logic for both batch and streaming paths.
+
+        Callers are responsible for normalization — this method does NOT call
+        ``_normalize_response_tokens``.
+        """
         assistant_message, parse_success = parse_response_for_stop_token(
             response, self.tokenizer, self._end_message_token
         )
-        if not parse_success:
+        if not parse_success and not allow_missing_stop:
             return assistant_message, False
 
         assert isinstance(assistant_message["content"], str)
@@ -271,7 +308,36 @@ class _DeepSeekV3BaseRenderer(Renderer):
         else:
             assistant_message["content"] = content
 
-        return assistant_message, True
+        return assistant_message, parse_success
+
+    def parse_response(self, response: list[int]) -> tuple[Message, bool]:
+        """Parse sampled token IDs back into an assistant Message.
+
+        Normalizes response tokens, strips the end-of-sentence stop token, and
+        parses ``<think>...</think>`` blocks and DeepSeek-specific tool call tokens
+        into structured content.
+
+        Args:
+            response (list[int]): Raw token IDs from the sampler.
+
+        Returns:
+            tuple[Message, bool]: The parsed assistant message (with structured content
+                and optional tool_calls) and whether the stop token was found.
+        """
+        response = self._normalize_response_tokens(response)
+        return self._parse_response_content(response, allow_missing_stop=False)
+
+    def _parse_response_for_streaming(self, response: list[int]) -> tuple[Message, bool]:
+        """Parse response for streaming, always applying full content parsing.
+
+        Unlike parse_response which short-circuits on missing stop token,
+        this always parses think blocks and tool calls from the content.
+
+        Note: _normalize_response_tokens is NOT called here because
+        parse_response_streaming already normalizes before feeding tokens
+        to the parser.
+        """
+        return self._parse_response_content(response, allow_missing_stop=True)
 
     def to_openai_message(self, message: Message) -> dict:
         """Convert a Message to OpenAI API format with reasoning_content for thinking.
@@ -298,7 +364,7 @@ class _DeepSeekV3BaseRenderer(Renderer):
                 result["reasoning_content"] = "".join(thinking_parts)
 
         # Handle tool_calls
-        if "tool_calls" in message and message["tool_calls"]:
+        if "tool_calls" in message and message["tool_calls"]:  # noqa: RUF019
             result["tool_calls"] = [
                 {
                     "type": "function",
@@ -427,8 +493,8 @@ class DeepSeekV3ThinkingRenderer(_DeepSeekV3BaseRenderer):
         think_prefill = "<think>" + (prefill or "")
         return super().build_generation_prompt(messages, role, think_prefill)
 
-    def parse_response(self, response: list[int]) -> tuple[Message, bool]:
-        """Parse response, prepending <think> since we prefill with it.
+    def _normalize_response_tokens(self, response: list[int]) -> list[int]:
+        """Restore the prefilled <think> token before parsing sampled tokens.
 
         When sampling with build_generation_prompt, the <think> tag is part of the
         prefill and not included in the sampled tokens. The response will be
@@ -437,12 +503,10 @@ class DeepSeekV3ThinkingRenderer(_DeepSeekV3BaseRenderer):
         think_prefix_token: int = self.tokenizer.convert_tokens_to_ids("<think>")  # type: ignore[assignment]
         think_suffix_token: int = self.tokenizer.convert_tokens_to_ids("</think>")  # type: ignore[assignment]
 
-        # Only prepend <think> if the response doesn't already start with it and contains </think>
         starts_with_think = len(response) > 0 and response[0] == think_prefix_token
         if not starts_with_think and think_suffix_token in response:
-            response = [think_prefix_token] + response
-
-        return super().parse_response(response)
+            return [think_prefix_token] + response
+        return response
 
 
 class DeepSeekV3DisableThinkingRenderer(_DeepSeekV3BaseRenderer):

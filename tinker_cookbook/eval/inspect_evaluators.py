@@ -1,14 +1,15 @@
 import logging
-import os
-from typing import Optional
+from pathlib import Path
 
 import chz
 import tinker
 from inspect_ai import Tasks, eval_async
 from inspect_ai.model import GenerateConfig as InspectAIGenerateConfig
 from inspect_ai.model import Model as InspectAIModel
+
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
 from tinker_cookbook.eval.inspect_utils import InspectAPIFromTinkerSampling
+from tinker_cookbook.exceptions import ConfigurationError
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -24,13 +25,16 @@ class InspectEvaluatorBuilder:
 
     # Required parameters
     tasks: Tasks
-    renderer_name: str
+    renderer_name: str | None = None
     # TODO: remove model_name once the SDK adds a get_tokenizer method to sampling client
     model_name: str | None = None
     # Random seed for sampling. If None, sampling is non-deterministic.
     seed: int | None = None
     # If True, logs prompts and responses to the console (useful for debugging).
     verbose: bool = False
+    # When True, model reasoning/thinking is preserved in inspect output as ContentReasoning.
+    # When False (default), reasoning is stripped and only text content is returned.
+    include_reasoning: bool = False
 
     # Generation parameters
     temperature: float = 1.0
@@ -44,12 +48,14 @@ class InspectEvaluatorBuilder:
 
     # Evaluation parameters
     # Maximum number of samples to evaluate. If None, evaluates all samples.
-    limit: Optional[int] = None
+    limit: int | None = None
     debug_errors: bool = True
-    log_dir: Optional[str] = None
+    log_dir: str | None = None
     # Maximum concurrent sampling requests to Tinker.
     max_connections: int = 512
     log_level: str = "INFO"
+    # Metadata to associate with this evaluation run (visible in inspect logs)
+    metadata: dict[str, str] | None = None
 
     def __call__(self) -> SamplingClientEvaluator:
         return InspectEvaluator(self)
@@ -77,13 +83,16 @@ class InspectEvaluator(SamplingClientEvaluator):
             Dictionary of metrics from inspect evaluation
         """
         if self.config.model_name is None:
-            raise ValueError("model_name must be set before running evaluation")
+            raise ConfigurationError("model_name must be set before running evaluation")
+        if self.config.renderer_name is None:
+            raise ConfigurationError("renderer_name must be set before running evaluation")
         # Create the inspect API wrapper
         api = InspectAPIFromTinkerSampling(
             renderer_name=self.config.renderer_name,
             model_name=self.config.model_name,
             sampling_client=sampling_client,
             verbose=self.config.verbose,
+            include_reasoning=self.config.include_reasoning,
         )
         # Create the inspect model
         model = InspectAIModel(
@@ -110,11 +119,12 @@ class InspectEvaluator(SamplingClientEvaluator):
             # the inspect evaluation can still fail if e.g. the parser returns an error for
             # a given sample.
             fail_on_error=False,
-            log_dir=self.config.log_dir or os.path.expanduser("~/inspect-logs"),
+            log_dir=self.config.log_dir or str(Path("~/inspect-logs").expanduser()),
             max_connections=self.config.max_connections,
             log_level=self.config.log_level,
             log_realtime=False,
             log_buffer=1000,
+            metadata=self.config.metadata,
         )
 
         # Extract metrics from results

@@ -1,8 +1,10 @@
 import asyncio
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import tinker
 from tinker import types
+
 from tinker_cookbook import renderers
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -66,7 +68,7 @@ class CustomEvaluator(SamplingClientEvaluator):
             if self.grader_fn(content, datum["output"]):
                 num_correct += 1
 
-        metrics["accuracy"] = num_correct / num_examples
+        metrics["accuracy"] = num_correct / num_examples if num_examples > 0 else 0.0
         return metrics
 
 

@@ -1,12 +1,14 @@
-import chz
+import asyncio
 import sys
+
+import chz
+
 from tinker_cookbook import cli_utils, model_info
 from tinker_cookbook.recipes.chat_sl import chat_datasets
 from tinker_cookbook.renderers import TrainOnWhat
 from tinker_cookbook.supervised import train
 from tinker_cookbook.supervised.data import FromConversationFileBuilder
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
-import asyncio
 
 
 def build_config_blueprint() -> chz.Blueprint[train.Config]:
@@ -30,6 +32,7 @@ def build_config_blueprint() -> chz.Blueprint[train.Config]:
         {
             "log_path": "/tmp/tinker-examples/sl_basic",
             "model_name": model_name,
+            "renderer_name": renderer_name,
             "dataset_builder": dataset,
             "learning_rate": 2e-4,
             "lr_schedule": "linear",

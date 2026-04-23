@@ -3,19 +3,23 @@ Implements on-policy distillation. For more details, see:
 https://thinkingmachines.ai/blog/on-policy-distillation
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
-import os
-import time
-from typing import Any, Dict, List, Sequence, cast
+from collections.abc import Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from tinker_cookbook.stores.training_store import TrainingRunStore
 
 import chz
 import tinker
 import torch
-
 from tinker.types import LossFnType
 
-from tinker_cookbook import checkpoint_utils
+from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.distillation.datasets import (
     CompositeDataset,
@@ -39,21 +43,20 @@ from tinker_cookbook.rl.types import (
     TrajectoryGroup,
 )
 from tinker_cookbook.tokenizer_utils import Tokenizer
-from tinker_cookbook.utils import ml_log
-from tinker_cookbook.utils.misc_utils import safezip, timed
-from tinker_cookbook.utils.trace import scope, update_scope_context, trace_init
+from tinker_cookbook.utils import ml_log, trace
+from tinker_cookbook.utils.misc_utils import iteration_dir, safezip
 
 logger = logging.getLogger(__name__)
 
 
-@scope
+@trace.scope
 async def incorporate_kl_penalty(
-    data_D: List[tinker.Datum],
-    teacher_clients_D: List[tinker.SamplingClient],
-    dataset_indices_D: List[int],
+    data_D: list[tinker.Datum],
+    teacher_clients_D: list[tinker.SamplingClient],
+    dataset_indices_D: list[int],
     kl_penalty_coef: float,
     kl_discount_factor: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute reverse KL between the student (log p) and the teacher model (log q), computed as
     log p - log q. We then adjust the advantages in-place as the negative reverse KL.
@@ -92,15 +95,13 @@ async def incorporate_kl_penalty(
     ]
     # Track per-dataset KL for logging
     # dataset_idx -> (sum of KL, sum of mask)
-    per_dataset_kl: Dict[int, tuple[float, float]] = {}
+    per_dataset_kl: dict[int, tuple[float, float]] = {}
 
     for i, datum in enumerate(data_D):
         # The advantage is the negative reverse KL. We can optionally apply a discount factor.
         kl_advantages = -kl_penalty_coef * float_masks[i] * reverse_kl[i]
         if kl_discount_factor > 0:
-            kl_advantages = torch.tensor(
-                discounted_future_sum_vectorized(kl_advantages.numpy(), kl_discount_factor)
-            )
+            kl_advantages = discounted_future_sum_vectorized(kl_advantages, kl_discount_factor)
         datum.loss_fn_inputs["advantages"] = tinker.TensorData.from_torch(
             datum.loss_fn_inputs["advantages"].to_torch() + kl_advantages
         )
@@ -131,8 +132,9 @@ async def incorporate_kl_penalty(
 @chz.chz
 class Config:
     learning_rate: float
-    dataset_configs: List[DistillationDatasetConfig]
+    dataset_configs: list[DistillationDatasetConfig]
     model_name: str
+    renderer_name: str | None = None
     max_tokens: int
     temperature: float = 1.0
     compute_post_kl: bool = False
@@ -154,25 +156,26 @@ class Config:
     wandb_project: str | None = None
     wandb_name: str | None = None
 
-    log_path: str = chz.field(munger=lambda _, s: os.path.expanduser(s))
+    log_path: str = chz.field(munger=lambda _, s: str(Path(s).expanduser()))
     base_url: str | None = None
     enable_trace: bool = False
+    span_chart_every: int = 0
 
     eval_every: int = 20
     save_every: int = 20
     load_checkpoint_path: str | None = None
 
     # Maximum number of training steps. If None, train on the full dataset.
-    max_step: int | None = None
+    max_steps: int | None = None
 
 
-@scope
+@trace.scope
 async def prepare_minibatch(
     env_group_builders_P: Sequence[EnvGroupBuilder],
     trajectory_groups_P: list[TrajectoryGroup],
     tokenizer: Tokenizer,
-    dataset_indices_P: List[int],
-    teacher_clients: List[tinker.SamplingClient],
+    dataset_indices_P: list[int],
+    teacher_clients: list[tinker.SamplingClient],
     kl_penalty_coef: float,
     kl_discount_factor: float,
 ) -> tuple[list[tinker.Datum], dict[str, Any]]:
@@ -184,7 +187,7 @@ async def prepare_minibatch(
     metrics.update(compute_trajectory_metrics(trajectory_groups_P, taglist_P))
 
     # Assemble training data
-    with timed("assemble_training_data", metrics):
+    async with trace.scope_span("assemble_training_data"):
         advantages_P = compute_advantages(trajectory_groups_P)
         data_D, metadata_D = assemble_training_data(trajectory_groups_P, advantages_P)
 
@@ -198,7 +201,7 @@ async def prepare_minibatch(
 
     # Incorporate KL penalty if configured
     if kl_penalty_coef > 0:
-        with timed("compute_kl_penalty", metrics):
+        async with trace.scope_span("compute_kl_penalty"):
             # Map each datum to its teacher sampling client and dataset index using metadata
             #   - metadata_D contains group_idx which indexes into trajectory_groups_P
             #   - dataset_indices_P[group_idx] gives us the dataset index
@@ -221,19 +224,20 @@ async def prepare_minibatch(
     return data_D, metrics
 
 
-@scope
+@trace.scope
 async def do_train_step_and_get_sampling_client(
-    cfg: Config,
+    config: Config,
     i_batch: int,
     training_client: tinker.TrainingClient,
     service_client: tinker.ServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
     trajectory_groups_P: list[TrajectoryGroup],
-    dataset_indices_P: List[int],
-    teacher_clients: List[tinker.SamplingClient],
+    dataset_indices_P: list[int],
+    teacher_clients: list[tinker.SamplingClient],
+    store: TrainingRunStore | None = None,
 ) -> tuple[tinker.SamplingClient, dict[str, Any]]:
-    update_scope_context({"step": i_batch})
+    trace.update_scope_context({"step": i_batch})
 
     metrics = {}
     data_D, prepare_minibatch_metrics = await prepare_minibatch(
@@ -242,19 +246,19 @@ async def do_train_step_and_get_sampling_client(
         tokenizer,
         dataset_indices_P,
         teacher_clients,
-        kl_penalty_coef=cfg.kl_penalty_coef,
-        kl_discount_factor=cfg.kl_discount_factor,
+        kl_penalty_coef=config.kl_penalty_coef,
+        kl_discount_factor=config.kl_discount_factor,
     )
     metrics.update(prepare_minibatch_metrics)
 
-    with timed("train", metrics):
+    async with trace.scope_span("train"):
         training_logprobs_D = await train_step(
             data_D=data_D,
             training_client=training_client,
-            learning_rate=cfg.learning_rate,
-            num_substeps=cfg.num_substeps,
-            loss_fn=cfg.loss_fn,
-            loss_fn_config=cfg.loss_fn_config,
+            learning_rate=config.learning_rate,
+            num_substeps=config.num_substeps,
+            loss_fn=config.loss_fn,
+            loss_fn_config=config.loss_fn_config,
             metrics=metrics,
         )
 
@@ -264,26 +268,27 @@ async def do_train_step_and_get_sampling_client(
         i_batch + 1,
         data_D,
         training_logprobs_D,
-        cfg.log_path,
-        cfg.save_every,
-        cfg.compute_post_kl,
+        config.log_path,
+        config.save_every,
+        config.compute_post_kl,
+        store=store,
     )
     metrics.update(full_batch_metrics)
 
     return sampling_client, metrics
 
 
-@scope
+@trace.scope
 async def do_sync_training(
     start_batch: int,
     end_batch: int,
     num_batches: int,
-    cfg: Config,
+    config: Config,
     training_client: tinker.TrainingClient,
     service_client: tinker.ServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: CompositeDataset,
-    teacher_clients: List[tinker.SamplingClient],
+    teacher_clients: list[tinker.SamplingClient],
     ml_logger: ml_log.Logger,
     tokenizer: Tokenizer,
 ):
@@ -291,111 +296,142 @@ async def do_sync_training(
 
     # Initial sampling client
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, start_batch, cfg.log_path, cfg.save_every
+        training_client, start_batch, config.log_path, config.save_every, store=ml_logger.store
     )
+
+    log_path = Path(config.log_path)
 
     for i_batch in range(start_batch, end_batch):
         metrics = {
             "progress/batch": i_batch,
-            "optim/lr": cfg.learning_rate,
+            "optim/lr": config.learning_rate,
             "progress/done_frac": (i_batch + 1) / num_batches,
         }
-        t_start = time.time()
 
-        # Run evaluations
-        if cfg.eval_every > 0 and i_batch % cfg.eval_every == 0:
-            with timed("run_evals", metrics):
-                for evaluator in evaluators:
-                    eval_metrics = await evaluator(sampling_client)
-                    metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
+        with trace.trace_iteration(step=i_batch) as window:
+            # Run evaluations
+            if config.eval_every > 0 and i_batch % config.eval_every == 0:
+                async with trace.scope_span("run_evals"):
+                    for evaluator in evaluators:
+                        eval_metrics = await evaluator(sampling_client)
+                        metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
 
-        # Get batch and sample trajectories
-        env_group_builders_P, dataset_indices_P = dataset.get_batch(i_batch)
-        with timed("sample", metrics):
-            trajectory_groups_P = await asyncio.gather(
-                *[
-                    asyncio.create_task(
-                        do_group_rollout_and_filter_constant_reward(
-                            sampling_client,
-                            builder,
-                            temperature=cfg.temperature,
-                            max_tokens=cfg.max_tokens,
-                            do_remove_constant_reward_groups=False,
-                        ),
-                        name=f"sample_task_{i}",
-                    )
-                    for i, builder in enumerate(env_group_builders_P)
-                ],
+            # Get batch and sample trajectories
+            env_group_builders_P, dataset_indices_P = dataset.get_batch(i_batch)
+            async with trace.scope_span("sample"):
+                trajectory_groups_P = await asyncio.gather(
+                    *[
+                        asyncio.create_task(
+                            do_group_rollout_and_filter_constant_reward(
+                                sampling_client,
+                                builder,
+                                temperature=config.temperature,
+                                max_tokens=config.max_tokens,
+                                do_remove_constant_reward_groups=False,
+                            ),
+                            name=f"sample_task_{i}",
+                        )
+                        for i, builder in enumerate(env_group_builders_P)
+                    ],
+                )
+            trajectory_groups_P = [
+                trajectory_group
+                for trajectory_group in trajectory_groups_P
+                if trajectory_group is not None
+            ]
+
+            # Train step
+            sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
+                config,
+                i_batch,
+                training_client,
+                service_client,
+                tokenizer,
+                env_group_builders_P,
+                trajectory_groups_P,
+                dataset_indices_P,
+                teacher_clients,
+                store=ml_logger.store,
             )
-        trajectory_groups_P = [
-            trajectory_group
-            for trajectory_group in trajectory_groups_P
-            if trajectory_group is not None
-        ]
 
-        # Train step
-        sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
-            cfg,
-            i_batch,
-            training_client,
-            service_client,
-            tokenizer,
-            env_group_builders_P,
-            trajectory_groups_P,
-            dataset_indices_P,
-            teacher_clients,
-        )
+            metrics.update(train_step_metrics)
 
-        # Log metrics
-        metrics.update(train_step_metrics)
-        metrics["time/total"] = time.time() - t_start
+        # Log timing metrics from trace_iteration window
+        metrics.update(window.get_timing_metrics())
+        window.save_timing(i_batch, store=ml_logger.store)
+        if config.span_chart_every > 0 and i_batch % config.span_chart_every == 0:
+            iter_dir = iteration_dir(log_path, i_batch)
+            if iter_dir is not None:
+                iter_dir.mkdir(parents=True, exist_ok=True)
+                trace.save_gantt_chart_html(window, i_batch, iter_dir / "timing_gantt.html")
         ml_logger.log_metrics(metrics, step=i_batch)
 
 
-@scope
+@trace.scope
 async def main(
-    cfg: Config,
+    config: Config,
 ):
     """Main training loop for on-policy distillation."""
+
     ml_logger = ml_log.setup_logging(
-        log_dir=cfg.log_path,
-        wandb_project=cfg.wandb_project,
-        config=cfg,
-        wandb_name=cfg.wandb_name,
+        log_dir=config.log_path,
+        wandb_project=config.wandb_project,
+        config=config,
+        wandb_name=config.wandb_name,
     )
-    if cfg.enable_trace:
+    store = ml_logger.store
+    if config.enable_trace:
         # Get and rename the current (main) task
         current_task = asyncio.current_task()
         if current_task is not None:
             current_task.set_name("main")
-        trace_events_path = os.path.join(cfg.log_path, "trace_events.jsonl")
+        trace_events_path = str(Path(config.log_path) / "trace_events.jsonl")
         logger.info(f"Tracing is enabled. Trace events will be saved to {trace_events_path}")
         logger.info(
             f"Run `python tinker_cookbook/utils/trace.py {trace_events_path} trace.json` and visualize in chrome://tracing or https://ui.perfetto.dev/"
         )
-        trace_init(output_file=trace_events_path)
+        trace.trace_init(output_file=trace_events_path)
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("pylatexenc").setLevel(logging.WARNING)
 
-    resume_info = checkpoint_utils.get_last_checkpoint(cfg.log_path)
+    resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
-        start_batch = resume_info["batch"]
+        start_batch = resume_info.batch
     else:
         start_batch = 0
 
-    service_client = tinker.ServiceClient(base_url=cfg.base_url)
-    training_client = await service_client.create_lora_training_client_async(
-        cfg.model_name, rank=cfg.lora_rank
-    )
+    service_client = tinker.ServiceClient(base_url=config.base_url)
+    user_metadata: dict[str, str] = {}
+    if wandb_link := ml_logger.get_logger_url():
+        user_metadata["wandb_link"] = wandb_link
+    checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
+    model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
-    load_state_path: str | None = (
-        resume_info["state_path"] if resume_info else cfg.load_checkpoint_path
-    )
-    if load_state_path:
-        future = await training_client.load_state_with_optimizer_async(load_state_path)
-        _ = await future.result_async()
-        logger.info(f"Loaded state from {load_state_path}")
+    if resume_info:
+        # Resuming interrupted training - load optimizer state for proper continuation
+        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
+            service_client, resume_info.state_path, config.renderer_name
+        )
+        training_client = (
+            await service_client.create_training_client_from_state_with_optimizer_async(
+                resume_info.state_path, user_metadata=user_metadata
+            )
+        )
+        logger.info(f"Resumed training from {resume_info.state_path}")
+    elif config.load_checkpoint_path:
+        # Starting fresh from a checkpoint - load weights only (fresh optimizer)
+        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
+            service_client, config.load_checkpoint_path, config.renderer_name
+        )
+        training_client = await service_client.create_training_client_from_state_async(
+            config.load_checkpoint_path, user_metadata=user_metadata
+        )
+        logger.info(f"Loaded weights from {config.load_checkpoint_path}")
+    else:
+        training_client = await service_client.create_lora_training_client_async(
+            config.model_name, rank=config.lora_rank, user_metadata=user_metadata
+        )
 
     # Get tokenizer from training client
     tokenizer = training_client.get_tokenizer()
@@ -404,9 +440,9 @@ async def main(
     datasets = []
     teacher_clients = []
     groups_per_batch_list = []
-    evaluators = [evaluator() for evaluator in cfg.evaluator_builders]
+    evaluators = [evaluator() for evaluator in config.evaluator_builders]
 
-    for dataset_config in cfg.dataset_configs:
+    for dataset_config in config.dataset_configs:
         # Create dataset
         dataset, maybe_test_dataset = await dataset_config.dataset_builder()
         datasets.append(dataset)
@@ -414,7 +450,7 @@ async def main(
 
         # Add test dataset evaluator if present
         if maybe_test_dataset is not None:
-            evaluators.append(RLTestSetEvaluator(maybe_test_dataset, max_tokens=cfg.max_tokens))
+            evaluators.append(RLTestSetEvaluator(maybe_test_dataset, max_tokens=config.max_tokens))
 
         # Create teacher sampling client
         teacher_config = dataset_config.teacher_config
@@ -434,7 +470,9 @@ async def main(
     # Wrap datasets in CompositeDataset
     composite_dataset = CompositeDataset(datasets, groups_per_batch_list)
     num_batches = len(composite_dataset)
-    num_batches = min(cfg.max_step, num_batches) if cfg.max_step is not None else num_batches
+    num_batches = (
+        min(config.max_steps, num_batches) if config.max_steps is not None else num_batches
+    )
     logger.info(f"Will train on {num_batches} batches (dataset has {num_batches})")
 
     # Training loop
@@ -442,7 +480,7 @@ async def main(
         start_batch=start_batch,
         end_batch=num_batches,
         num_batches=num_batches,
-        cfg=cfg,
+        config=config,
         training_client=training_client,
         service_client=service_client,
         evaluators=evaluators,
@@ -457,9 +495,11 @@ async def main(
         _ = await checkpoint_utils.save_checkpoint_async(
             training_client=training_client,
             name="final",
-            log_path=cfg.log_path,
+            log_path=config.log_path,
             kind="both",
             loop_state={"batch": num_batches},
+            ttl_seconds=None,
+            store=store,
         )
     else:
         logger.info("Training was already complete; nothing to do")

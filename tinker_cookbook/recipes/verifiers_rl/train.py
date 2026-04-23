@@ -55,6 +55,8 @@ class CLIConfig:
     wandb_name: str | None = None
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
+    max_steps: int | None = None
+
 
 async def cli_main(cli_config: CLIConfig, env: Any | None):
     model_name_short = cli_config.model_name.replace("/", "-")
@@ -124,7 +126,7 @@ async def cli_main(cli_config: CLIConfig, env: Any | None):
         dataset_seed=cli_config.dataset_seed,
     )
 
-    cfg = train.Config(
+    config = train.Config(
         learning_rate=cli_config.learning_rate,
         dataset_builder=dataset_builder,
         model_name=cli_config.model_name,
@@ -139,9 +141,10 @@ async def cli_main(cli_config: CLIConfig, env: Any | None):
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
         stream_minibatch_config=None,
+        max_steps=cli_config.max_steps,
     )
 
-    await train.main(cfg)
+    await train.main(config)
 
 
 if __name__ == "__main__":
