@@ -1,18 +1,22 @@
 """Renderer for Moonshot AI's Kimi K2.5 models."""
 
+from typing import cast
+
 import tinker
 
+from tinker_cookbook.exceptions import RendererError
+from tinker_cookbook.image_processing_utils import ImageProcessor
 from tinker_cookbook.renderers.base import (
+    ContentPart,
+    ImageProcessorProtocol,
     Message,
-    RenderContext,
-    RenderedMessage,
     Role,
     ToolSpec,
+    image_to_chunk,
 )
 from tinker_cookbook.renderers.kimi_k2 import KimiK2Renderer
-from tinker_cookbook.renderers.kimi_k2_5_tool_declaration_ts import (
-    encode_tools_to_typescript_style,
-)
+from tinker_cookbook.renderers.kimi_k2_5_tool_declaration_ts import encode_tools_to_typescript_style
+from tinker_cookbook.tokenizer_utils import Tokenizer
 
 
 class KimiK25Renderer(KimiK2Renderer):
@@ -32,25 +36,94 @@ class KimiK25Renderer(KimiK2Renderer):
     while the generation prompt adds an open <think> tag to enable thinking.
     """
 
-    def render_message(self, message: Message, ctx: RenderContext) -> RenderedMessage:
-        content = message["content"]
-        if not isinstance(content, str):
-            for p in content:
-                if p["type"] == "image":
-                    raise NotImplementedError(
-                        "Image content is not supported for Kimi K2.5 yet. It's coming soon!"
-                    )
+    image_processor: ImageProcessor | None
+    _think_open_token: int
+    _think_close_token: int
 
-        return super().render_message(message, ctx)
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        image_processor: ImageProcessor | None = None,
+        strip_thinking_from_history: bool = True,
+    ):
+        """Initialize the Kimi K2.5 renderer.
+
+        Args:
+            tokenizer (Tokenizer): The tokenizer to use for encoding.
+            image_processor (ImageProcessor | None): Processor for converting images
+                to model-compatible chunks. Required if messages contain image content.
+            strip_thinking_from_history (bool): When True (default), replaces thinking
+                content with empty ``<think></think>`` in historical assistant messages.
+        """
+        super().__init__(tokenizer, strip_thinking_from_history=strip_thinking_from_history)
+        self.image_processor = image_processor
+        (self._think_open_token,) = self.tokenizer.encode("<think>", add_special_tokens=False)
+        (self._think_close_token,) = self.tokenizer.encode("</think>", add_special_tokens=False)
+
+    def _encode_multipart_content(self, content: list[ContentPart]) -> list[tinker.ModelInputChunk]:
+        chunks = []
+        for part in content:
+            if part["type"] == "text":
+                chunks.append(
+                    tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(part["text"]))
+                )
+            elif part["type"] == "image":
+                assert self.image_processor is not None, (
+                    "KimiK25Renderer must be initialized with an image processor in order to support image content parts"
+                )
+                chunks.append(
+                    tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(self._image_prefix))
+                )
+                chunks.append(
+                    image_to_chunk(
+                        part["image"], cast(ImageProcessorProtocol, self.image_processor)
+                    )
+                )
+                chunks.append(
+                    tinker.types.EncodedTextChunk(tokens=self.tokenizer.encode(self._image_suffix))
+                )
+            else:
+                raise RendererError(f"Unsupported content type: {part['type']}")
+        return chunks
+
+    @property
+    def _image_prefix(self) -> str:
+        return "<|media_begin|>image<|media_content|>"
+
+    @property
+    def _image_suffix(self) -> str:
+        return "<|media_end|>\n"
 
     def build_generation_prompt(
         self, messages: list[Message], role: Role = "assistant", prefill: str | None = None
     ) -> tinker.ModelInput:
-        """Build generation prompt with <think> prefill for thinking mode."""
+        """Build generation prompt with ``<think>`` prefill for thinking mode.
+
+        Appends an open ``<think>`` tag as the default prefill to enable the model's
+        thinking mode. A custom prefill overrides this default.
+
+        Args:
+            messages (list[Message]): The conversation messages.
+            role (Role): The role for the generation prompt (default "assistant").
+            prefill (str | None): Optional prefill text. If None, defaults to ``<think>``.
+
+        Returns:
+            tinker.ModelInput: The tokenized model input ready for sampling.
+        """
         # If no prefill specified, use <think> to enable thinking
         if prefill is None:
             prefill = "<think>"
         return super().build_generation_prompt(messages, role=role, prefill=prefill)
+
+    def _normalize_response_tokens(self, response: list[int]) -> list[int]:
+        """Restore the synthetic <think> prefill before parsing sampled tokens."""
+        if (
+            response
+            and response[0] != self._think_open_token
+            and self._think_close_token in response
+        ):
+            return [self._think_open_token, *response]
+        return response
 
     def create_conversation_prefix_with_tools(
         self, tools: list[ToolSpec], system_prompt: str = ""
@@ -60,6 +133,14 @@ class KimiK25Renderer(KimiK2Renderer):
         Per the HuggingFace chat template, Kimi K2.5 uses TypeScript-style tool
         declarations instead of JSON format. The tool_declare message comes BEFORE
         the regular system message.
+
+        Args:
+            tools (list[ToolSpec]): Tool specifications to encode in TypeScript style.
+            system_prompt (str): Custom system prompt. If empty, uses the default
+                Kimi system prompt.
+
+        Returns:
+            list[Message]: Messages to prepend to conversations (tool_declare + system).
 
         Reference: kimi-k2.5-hf-tokenizer/chat_template.jinja
         """
@@ -93,7 +174,17 @@ class KimiK25DisableThinkingRenderer(KimiK25Renderer):
     def build_generation_prompt(
         self, messages: list[Message], role: Role = "assistant", prefill: str | None = None
     ) -> tinker.ModelInput:
-        """Build generation prompt with <think></think> prefill to disable thinking."""
+        """Build generation prompt with ``<think></think>`` prefill to disable thinking.
+
+        Args:
+            messages (list[Message]): The conversation messages.
+            role (Role): The role for the generation prompt (default "assistant").
+            prefill (str | None): Optional prefill text. If None, defaults to
+                ``<think></think>`` to disable thinking.
+
+        Returns:
+            tinker.ModelInput: The tokenized model input ready for sampling.
+        """
         # If no prefill specified, use <think></think> to disable thinking
         if prefill is None:
             prefill = "<think></think>"

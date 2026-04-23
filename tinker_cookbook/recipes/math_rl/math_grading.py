@@ -7,12 +7,21 @@ Includes math_normalize functionality that was dependency of grader.
 import contextlib
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Any, Callable, Dict, Tuple, TypeVar
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from typing import Any, TypeVar
 
-import sympy
-from pylatexenc import latex2text
-from sympy.parsing import sympy_parser
+try:
+    import sympy
+    from pylatexenc import latex2text
+    from sympy.parsing import sympy_parser
+except ImportError:
+    raise ImportError(
+        "math-rl dependencies (sympy, pylatexenc, math-verify) are required for this recipe. "
+        "Install them with: uv pip install 'tinker-cookbook[math-rl] @ "
+        "git+https://github.com/thinking-machines-lab/tinker-cookbook.git@nightly'"
+    ) from None
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +110,8 @@ def _fix_sqrt(string: str) -> str:
     splits = string.split("\\sqrt")
     new_string = splits[0]
     for split in splits[1:]:
-        if split[0] != "{":
-            a = split[0]
+        if not split or split[0] != "{":
+            a = split[0] if split else ""
             new_substr = "\\sqrt{" + a + "}" + split[1:]
         else:
             new_substr = "\\sqrt" + split
@@ -302,7 +311,7 @@ def _strip_properly_formatted_commas(expr: str):
     return next_expr
 
 
-def _normalize(expr: str) -> str:
+def _normalize(expr: str) -> str | None:
     """Normalize answer expressions."""
     if expr is None:
         return None
@@ -376,7 +385,7 @@ def _normalize(expr: str) -> str:
 def count_unknown_letters_in_expr(expr: str):
     expr = expr.replace("sqrt", "")
     expr = expr.replace("frac", "")
-    letters_in_expr = set([x for x in expr if x.isalpha()])
+    letters_in_expr = {x for x in expr if x.isalpha()}
     return len(letters_in_expr)
 
 
@@ -389,7 +398,7 @@ def should_allow_eval(expr: str):
         if bad_string in expr:
             return False
 
-    return all(re.search(bad_regex, expr) is not None for bad_regex in BAD_REGEXES)
+    return all(re.search(bad_regex, expr) is None for bad_regex in BAD_REGEXES)
 
 
 def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
@@ -417,7 +426,7 @@ def split_tuple(expr: str):
         len(expr) > 2
         and expr[0] in TUPLE_CHARS
         and expr[-1] in TUPLE_CHARS
-        and all([ch not in expr[1:-1] for ch in TUPLE_CHARS])
+        and all(ch not in expr[1:-1] for ch in TUPLE_CHARS)
     ):
         elems = [elem.strip() for elem in expr[1:-1].split(",")]
     else:
@@ -445,7 +454,7 @@ def grade_answer(given_answer: str, ground_truth: str) -> bool:
     ground_truth_normalized = _normalize(ground_truth)
     given_normalized = _normalize(given_answer)
 
-    if ground_truth_normalized is None:
+    if ground_truth_normalized is None or given_normalized is None:
         return False
 
     if ground_truth_normalized == given_normalized:
@@ -465,8 +474,7 @@ def grade_answer(given_answer: str, ground_truth: str) -> bool:
             ground_truth_normalized[0] != given_normalized[0]
             or ground_truth_normalized[-1] != given_normalized[-1]
         )
-        or len(ground_truth_elems) != len(given_elems)
-    ):
+    ) or len(ground_truth_elems) != len(given_elems):
         is_correct = False
     else:
         for ground_truth_elem, given_elem in zip(ground_truth_elems, given_elems, strict=True):
@@ -517,8 +525,8 @@ class TimeoutException(Exception):
 
 def run_with_timeout_signal(
     func: Callable[..., T],
-    args: Tuple[Any, ...] = (),
-    kwargs: Dict[str, Any] = {},
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
     timeout_seconds: int = 5,
 ) -> T | None:
     """
@@ -533,6 +541,8 @@ def run_with_timeout_signal(
     Returns:
         The result of the function call, or None if it times out.
     """
+    if kwargs is None:
+        kwargs = {}
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(func, *args, **kwargs)
         try:

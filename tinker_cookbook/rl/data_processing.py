@@ -6,11 +6,11 @@ and assembling training batches.
 """
 
 import logging
-from typing import List
 
 import tinker
 import torch
 from tinker import TensorData
+
 from tinker_cookbook.rl.types import Trajectory, TrajectoryGroup
 from tinker_cookbook.supervised.common import (
     create_rightshifted_model_input_and_leftshifted_targets,
@@ -20,8 +20,17 @@ from tinker_cookbook.utils.misc_utils import all_same, safezip
 logger = logging.getLogger(__name__)
 
 
-def compute_advantages(trajectory_groups_P: List[TrajectoryGroup]) -> List[torch.Tensor]:
-    """Compute advantages for each trajectory, centered within groups."""
+def compute_advantages(trajectory_groups_P: list[TrajectoryGroup]) -> list[torch.Tensor]:
+    """Compute advantages for each trajectory, centered within groups.
+
+    Args:
+        trajectory_groups_P (list[TrajectoryGroup]): Groups of trajectories,
+            where each group's rewards are centered independently.
+
+    Returns:
+        list[torch.Tensor]: Per-group advantage tensors of shape ``(G,)``,
+            where ``G`` is the number of trajectories in each group.
+    """
     advantages_P: list[torch.Tensor] = []
 
     for traj_group in trajectory_groups_P:
@@ -84,8 +93,8 @@ def _flatten_chunks(chunks: list[tinker.ModelInputChunk]) -> FlatOb:
 
 
 def trajectory_to_data(traj: Trajectory, traj_advantage: float) -> list[tinker.Datum]:
-    """
-    Return one or more Datum objects corresponding to the trajectory.
+    """Return one or more Datum objects corresponding to the trajectory.
+
     If the sequence grows by appending, i.e., each successive observation contains
     the previous observation+action as a prefix, then we can return a single Datum.
     However, if we get a sequence that's not an extension of the previous sequence,
@@ -101,6 +110,16 @@ def trajectory_to_data(traj: Trajectory, traj_advantage: float) -> list[tinker.D
 
     Then we will merge the first two observation-action pairs into a single Datum,
     and the last observation-action pair into a separate Datum.
+
+    Args:
+        traj (Trajectory): A single trajectory containing transitions
+            (observation-action pairs).
+        traj_advantage (float): The scalar advantage to assign to all action
+            tokens in this trajectory.
+
+    Returns:
+        list[tinker.Datum]: One or more training datums, each containing
+            model input, targets, sampled log-probs, advantages, and masks.
     """
 
     class SequenceAccumulator:
@@ -172,10 +191,22 @@ def trajectory_to_data(traj: Trajectory, traj_advantage: float) -> list[tinker.D
 
 
 def assemble_training_data(
-    trajectory_groups_P: List[TrajectoryGroup],
-    advantages_P: List[torch.Tensor],
-) -> tuple[List[tinker.Datum], List[dict[str, int]]]:
-    """Convert trajectories to training data format."""
+    trajectory_groups_P: list[TrajectoryGroup],
+    advantages_P: list[torch.Tensor],
+) -> tuple[list[tinker.Datum], list[dict[str, int]]]:
+    """Convert trajectories to training data format.
+
+    Args:
+        trajectory_groups_P (list[TrajectoryGroup]): Groups of trajectories
+            to convert into training datums.
+        advantages_P (list[torch.Tensor]): Per-group advantage tensors,
+            one per trajectory group, as returned by :func:`compute_advantages`.
+
+    Returns:
+        tuple[list[tinker.Datum], list[dict[str, int]]]: A flat list of
+            training datums and a parallel list of metadata dicts mapping
+            each datum back to its ``group_idx`` and ``traj_idx``.
+    """
     data_D: list[tinker.Datum] = []
     metadata_D: list[dict[str, int]] = []
 
@@ -188,14 +219,30 @@ def assemble_training_data(
             # Build the full sequence from the trajectory
             new_data = trajectory_to_data(traj, float(traj_advantage))
             data_D.extend(new_data)
-            metadata_D.extend([dict(group_idx=i_group, traj_idx=i_traj) for _ in new_data])
+            metadata_D.extend([{"group_idx": i_group, "traj_idx": i_traj} for _ in new_data])
 
     return data_D, metadata_D
 
 
 def remove_constant_reward_groups(
-    trajectory_groups_P: List[TrajectoryGroup],
-) -> List[TrajectoryGroup]:
+    trajectory_groups_P: list[TrajectoryGroup],
+) -> list[TrajectoryGroup]:
+    """Filter out trajectory groups where all trajectories received the same reward.
+
+    Groups with uniform rewards produce zero advantage for every trajectory,
+    contributing no gradient signal.  Removing them avoids wasted compute.
+    If *all* groups are uniform, a single group is returned so downstream code
+    that expects a non-empty list does not break.
+
+    Args:
+        trajectory_groups_P (list[TrajectoryGroup]): Groups of trajectories
+            to filter.
+
+    Returns:
+        list[TrajectoryGroup]: The subset of groups that contain at least two
+            distinct reward values, or a singleton list if every group was
+            uniform.
+    """
     new_groups: list[TrajectoryGroup] = []
     filtered_rewards: list[float] = []
     for group in trajectory_groups_P:

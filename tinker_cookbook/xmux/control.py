@@ -74,7 +74,7 @@ def load_existing_metadata(session_name: str) -> SessionMetadata | None:
     """Load existing session metadata"""
     metadata_path = os.path.expanduser(f"~/experiments/.xmux/{session_name}.json")
     if os.path.exists(metadata_path):
-        with open(metadata_path, "r") as f:
+        with open(metadata_path) as f:
             return SessionMetadata.model_validate_json(f.read())
     return None
 
@@ -108,7 +108,7 @@ class ControlWindow:
         """Load session metadata"""
         metadata_path = os.path.expanduser(f"~/experiments/.xmux/{self.session_name}.json")
         if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
+            with open(metadata_path) as f:
                 return SessionMetadata.model_validate_json(f.read())
         return SessionMetadata(session_name=self.session_name)
 
@@ -158,13 +158,14 @@ class ControlWindow:
             for line in result.stdout.strip().split("\n"):
                 if line and ":" in line:
                     parts = line.split(":")
-                    panes.append(
-                        PaneInfo(
-                            index=int(parts[0]),
-                            pid=int(parts[1]) if parts[1] else None,
-                            dead=parts[2] == "1",
+                    if len(parts) >= 3:
+                        panes.append(
+                            PaneInfo(
+                                index=int(parts[0]),
+                                pid=int(parts[1]) if parts[1] else None,
+                                dead=parts[2] == "1",
+                            )
                         )
-                    )
             return panes
         except subprocess.CalledProcessError:
             return []
@@ -389,7 +390,7 @@ class ControlWindow:
         elif key == curses.KEY_UP:
             self.selected_index = max(0, self.selected_index - 1)
 
-        elif key == curses.KEY_DOWN:
+        elif key == curses.KEY_DOWN and self.jobs:
             self.selected_index = min(len(self.jobs) - 1, self.selected_index + 1)
 
         elif ord("0") <= key <= ord("9"):
@@ -403,7 +404,7 @@ class ControlWindow:
                     )
                     break
 
-        elif key == ord("\n") or key == ord(" "):
+        elif (key == ord("\n") or key == ord(" ")) and self.jobs:
             # Select job
             job = self.jobs[self.selected_index]
             _ = subprocess.run(

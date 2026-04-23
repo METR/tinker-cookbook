@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 
 import chz
+
 from tinker_cookbook import cli_utils, model_info
 from tinker_cookbook.recipes.multiplayer_rl.twenty_questions.env import (
     TwentyQuestionsDatasetBuilder,
@@ -23,6 +24,10 @@ class CLIConfig:
     wandb_project: str | None = None
     wandb_name: str | None = None
     log_path: str | None = None
+
+    behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
+
+    max_steps: int | None = None
 
 
 def build_config(cli_config: CLIConfig) -> train.Config:
@@ -52,6 +57,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
 
     return train.Config(
         model_name=model_name,
+        renderer_name=renderer_name,
         log_path=log_path,
         dataset_builder=dataset_builder,
         learning_rate=cli_config.learning_rate,
@@ -59,16 +65,15 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         eval_every=cli_config.eval_every,
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
+        max_steps=cli_config.max_steps,
     )
 
 
-def main():
+if __name__ == "__main__":
     cli_config = chz.entrypoint(CLIConfig)
     config = build_config(cli_config)
     # Avoid clobbering log dir from your previous run:
-    cli_utils.check_log_dir(config.log_path, behavior_if_exists="ask")
+    cli_utils.check_log_dir(
+        config.log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists
+    )
     asyncio.run(train.main(config))
-
-
-if __name__ == "__main__":
-    main()

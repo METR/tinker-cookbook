@@ -1,22 +1,25 @@
 import functools
 import random
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 import chz
 import tinker
 from tinker import ModelInput
+
 from tinker_cookbook import model_info
 from tinker_cookbook.completers import (
     MessageCompleter,
     StopCondition,
     TinkerMessageCompleter,
 )
+from tinker_cookbook.model_info import get_recommended_renderer_name
 from tinker_cookbook.renderers import Message, Renderer, get_renderer, get_text_content
 from tinker_cookbook.rl.types import (
     Action,
+    ActionExtra,
     Env,
     EnvGroupBuilder,
     RLDataset,
@@ -25,7 +28,6 @@ from tinker_cookbook.rl.types import (
 )
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import logtree
-from tinker_cookbook.model_info import get_recommended_renderer_name
 
 ANSWERER_SYSTEM_PROMPT = """
 You are the answerer in a game of 20 questions. You should only ever respond with 'yes' or 'no'. Your secret word is {answer}. If the other player guesses it with Guess: <answer>, respond with 'yes' only if the answer is precisely your secret word.
@@ -94,7 +96,7 @@ class TwentyQuestionsEnv(Env):
         )
         return 1.0 if content_contains_answer else 0.0
 
-    async def step(self, action: Action) -> StepResult:
+    async def step(self, action: Action, *, extra: ActionExtra | None = None) -> StepResult:
         """
         In one step,
         1. The environment accepts an action from the player (a message containin a question or a guess).
@@ -146,7 +148,7 @@ def _load_words_from_file() -> list[str]:
     file_path = module_dir / "common_english_nouns.txt"
 
     rng = random.Random(0)
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         words = [line.strip() for line in f.readlines()]
     rng.shuffle(words)
     return words

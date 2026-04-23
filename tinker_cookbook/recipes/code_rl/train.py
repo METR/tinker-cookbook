@@ -4,8 +4,9 @@ from datetime import datetime
 
 import chz
 
-from tinker_cookbook import cli_utils, model_info
+from tinker_cookbook import checkpoint_utils, cli_utils
 from tinker_cookbook.recipes.code_rl.code_env import DeepcoderDatasetBuilder
+from tinker_cookbook.rl.rollout_strategy import RetryOnFailure
 from tinker_cookbook.rl.train import AsyncConfig, Config, main
 from tinker_cookbook.sandbox import SandboxBackend
 
@@ -29,7 +30,7 @@ class CLIConfig:
     group_size: int = 4
     groups_per_batch: int = 100
     learning_rate: float = 1e-5
-    max_tokens: int = 5
+    max_tokens: int = 4096
     kl_penalty_coef: float = 0.0
     num_substeps: int = 1
 
@@ -53,10 +54,19 @@ class CLIConfig:
     # Code execution sandbox configuration
     sandbox_backend: SandboxBackend = SandboxBackend.SANDBOXFUSION
 
+    max_steps: int | None = None
+
+    # Maximum number of times to retry a failed trajectory rollout (container crash,
+    # sandbox flake, etc.). None (default) = crash on any error. 0+ = retry budget.
+    rollout_max_retries: int | None = None
+
 
 async def cli_main(cli_config: CLIConfig) -> None:
-    renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
-        cli_config.model_name
+    renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
+        model_name=cli_config.model_name,
+        explicit_renderer_name=cli_config.renderer_name,
+        load_checkpoint_path=cli_config.load_checkpoint_path,
+        base_url=cli_config.base_url,
     )
 
     model_tag = cli_config.model_name.replace("/", "-")
@@ -82,12 +92,14 @@ async def cli_main(cli_config: CLIConfig) -> None:
         group_size=cli_config.group_size,
         seed=cli_config.seed,
         sandbox_backend=cli_config.sandbox_backend,
+        max_generation_tokens=cli_config.max_tokens,
     )
 
     config = Config(
         learning_rate=cli_config.learning_rate,
         dataset_builder=dataset_builder,
         model_name=cli_config.model_name,
+        renderer_name=renderer_name,
         lora_rank=cli_config.lora_rank,
         max_tokens=cli_config.max_tokens,
         wandb_project=cli_config.wandb_project,
@@ -106,6 +118,10 @@ async def cli_main(cli_config: CLIConfig) -> None:
         )
         if cli_config.max_steps_off_policy is not None
         else None,
+        max_steps=cli_config.max_steps,
+        rollout_error_tolerance=RetryOnFailure(max_retries=cli_config.rollout_max_retries)
+        if cli_config.rollout_max_retries is not None
+        else False,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)

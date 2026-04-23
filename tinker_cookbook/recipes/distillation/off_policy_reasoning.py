@@ -15,14 +15,15 @@ Example usage:
 
 import asyncio
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
 from typing import cast
 
 import chz
 import datasets
 import tinker
-from tinker_cookbook import cli_utils, model_info
+
+from tinker_cookbook import checkpoint_utils, cli_utils
 from tinker_cookbook.renderers import Message, TrainOnWhat
 from tinker_cookbook.supervised import train
 from tinker_cookbook.supervised.data import (
@@ -121,19 +122,24 @@ class CLIConfig:
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
+    max_steps: int | None = None
+
 
 def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
 
     # Get renderer name
-    renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
-        cli_config.model_name
+    renderer_name = checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default(
+        model_name=cli_config.model_name,
+        explicit_renderer_name=cli_config.renderer_name,
+        load_checkpoint_path=cli_config.load_checkpoint_path,
+        base_url=cli_config.base_url,
     )
 
     # Create log path if not specified
     if cli_config.log_path is not None:
         log_path = cli_config.log_path
-        run_name = os.path.basename(log_path)
+        run_name = Path(log_path).name
     else:
         model_name = cli_config.model_name.replace("/", "-")
         run_name = (
@@ -141,7 +147,7 @@ def cli_main(cli_config: CLIConfig):
             f"{cli_config.lora_rank}rank-{cli_config.learning_rate}lr-"
             f"{cli_config.batch_size}batch-{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
-        log_path = os.path.expanduser(f"~/tinker-examples/distillation/{run_name}")
+        log_path = f"/tmp/tinker-examples/distillation/{run_name}"
 
     # Create wandb name if not specified
     if cli_config.wandb_name is not None:
@@ -170,6 +176,7 @@ def cli_main(cli_config: CLIConfig):
     config = train.Config(
         log_path=log_path,
         model_name=cli_config.model_name,
+        renderer_name=renderer_name,
         load_checkpoint_path=cli_config.load_checkpoint_path,
         dataset_builder=dataset_builder,
         evaluator_builders=[],
@@ -183,6 +190,7 @@ def cli_main(cli_config: CLIConfig):
         lora_rank=cli_config.lora_rank,
         save_every=cli_config.save_every,
         eval_every=cli_config.eval_every,
+        max_steps=cli_config.max_steps,
     )
 
     # Run training

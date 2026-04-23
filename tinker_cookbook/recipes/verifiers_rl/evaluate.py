@@ -5,12 +5,12 @@ import json
 import time
 
 import chz
-import tinker
 import numpy as np
+import tinker
 import verifiers as vf
 from verifiers.utils.message_utils import messages_to_printable
 
-from tinker_cookbook import model_info, renderers
+from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.recipes.verifiers_rl.tinker_openai import TinkerAsyncOpenAIClient
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
@@ -91,7 +91,14 @@ async def evaluate(
 
     env = vf.load_environment(vf_env_id, **vf_env_args)
     tokenizer = get_tokenizer(model_name)
-    renderer_name = model_info.get_recommended_renderer_name(model_name)
+    renderer_name = None
+    if model_path is not None:
+        renderer_name = await checkpoint_utils.get_renderer_name_from_checkpoint_async(
+            service, model_path
+        )
+    if renderer_name is None:
+        renderer_name = model_info.get_recommended_renderer_name(model_name)
+    print(f"Using renderer: {renderer_name}")
     renderer = renderers.get_renderer(renderer_name, tokenizer)
 
     # Create sampling client from checkpoint path or base model
@@ -138,22 +145,22 @@ class CLIConfig:
     temperature: float = 1.0
 
 
-async def cli_main(cfg: CLIConfig):
-    env_args = json.loads(cfg.vf_env_args) if cfg.vf_env_args else {}
+async def cli_main(config: CLIConfig):
+    env_args = json.loads(config.vf_env_args) if config.vf_env_args else {}
     return await evaluate(
-        vf_env_id=cfg.vf_env_id,
+        vf_env_id=config.vf_env_id,
         vf_env_args=env_args,
-        model_name=cfg.model_name,
-        num_examples=cfg.num_examples,
-        rollouts_per_example=cfg.rollouts_per_example,
-        max_concurrent=cfg.max_concurrent,
-        max_tokens=cfg.max_tokens,
-        temperature=cfg.temperature,
-        model_path=cfg.model_path,
+        model_name=config.model_name,
+        num_examples=config.num_examples,
+        rollouts_per_example=config.rollouts_per_example,
+        max_concurrent=config.max_concurrent,
+        max_tokens=config.max_tokens,
+        temperature=config.temperature,
+        model_path=config.model_path,
     )
 
 
 if __name__ == "__main__":
-    cfg = chz.entrypoint(CLIConfig)
+    config = chz.entrypoint(CLIConfig)
 
-    asyncio.run(cli_main(cfg))
+    asyncio.run(cli_main(config))

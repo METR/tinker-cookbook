@@ -1,7 +1,8 @@
 import asyncio
+import sys
 
 import chz
-import sys
+
 from tinker_cookbook import cli_utils, model_info
 from tinker_cookbook.recipes.math_rl.math_env import Gsm8kDatasetBuilder
 from tinker_cookbook.rl import train
@@ -20,6 +21,7 @@ def build_config_blueprint() -> chz.Blueprint[train.Config]:
     return chz.Blueprint(train.Config).apply(
         {
             "model_name": model_name,
+            "renderer_name": renderer_name,
             "log_path": "/tmp/tinker-examples/rl_basic",
             "dataset_builder": builder,
             "learning_rate": 4e-5,

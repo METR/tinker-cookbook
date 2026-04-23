@@ -31,6 +31,18 @@ class RoleColonRenderer(Renderer):
         return True
 
     def render_message(self, message: Message, ctx: RenderContext) -> RenderedMessage:
+        """Render a chat message into the ``Role: content`` format.
+
+        Each message is formatted as ``{Role}: {content}\\n\\n`` with a stop_overlap
+        of ``User:`` for assistant messages to support the ``\\n\\nUser:`` stop sequence.
+
+        Args:
+            message (Message): The chat message to render.
+            ctx (RenderContext): Positional context for the message in the conversation.
+
+        Returns:
+            RenderedMessage: Header, output, and stop_overlap token chunks.
+        """
         header_str = message["role"].capitalize() + ":"
         output_str = " " + ensure_text(message["content"]) + "\n\n"
         # stop_overlap completes the stop sequence "\n\nUser:" for assistant messages.
@@ -50,9 +62,26 @@ class RoleColonRenderer(Renderer):
         return RenderedMessage(header=header, output=output, stop_overlap=stop_overlap)
 
     def get_stop_sequences(self) -> list[str]:
+        """Return stop sequences for RoleColon generation.
+
+        Returns:
+            list[str]: Single-element list containing the ``\\n\\nUser:`` string stop sequence.
+        """
         return ["\n\nUser:"]
 
     def parse_response(self, response: list[int]) -> tuple[Message, bool]:
+        """Parse sampled token IDs back into an assistant Message.
+
+        Splits the decoded text on the ``\\n\\nUser:`` stop sequence. Handles EOS
+        token stripping and multiple-delimiter edge cases.
+
+        Args:
+            response (list[int]): Raw token IDs from the sampler.
+
+        Returns:
+            tuple[Message, bool]: The parsed assistant message and whether the response
+                terminated cleanly with the expected stop sequence (not EOS).
+        """
         import logging
 
         logger = logging.getLogger(__name__)
@@ -66,7 +95,7 @@ class RoleColonRenderer(Renderer):
             response = response[:-1]
             terminated_with_eos = True
 
-        str_response = self.tokenizer.decode(response)
+        str_response = str(self.tokenizer.decode(response))
         splitted = str_response.split("\n\nUser:")
         if len(splitted) == 1:
             logger.debug(f"Response is not a valid assistant response: {str_response}")
@@ -75,10 +104,13 @@ class RoleColonRenderer(Renderer):
             before, _after = splitted
             return Message(role="assistant", content=before.strip()), not terminated_with_eos
         else:
-            raise ValueError(
-                f"When parsing response, expected to split into 1 or 2 pieces using stop tokens, but got {len(splitted)}. "
-                "You probably are using the wrong stop tokens when sampling"
+            logger.warning(
+                "RoleColonRenderer.parse_response saw multiple stop delimiters "
+                "(count=%d). Returning parse_success=False. Full response:\n%s",
+                len(splitted) - 1,
+                str_response,
             )
+            return Message(role="assistant", content=splitted[0].strip()), False
 
     @property
     def _bos_tokens(self) -> list[int]:
@@ -91,4 +123,13 @@ class RoleColonRenderer(Renderer):
     def create_conversation_prefix_with_tools(
         self, tools: list[ToolSpec], system_prompt: str = ""
     ) -> list[Message]:
+        """Not supported. RoleColon format has no tool calling convention.
+
+        Args:
+            tools (list[ToolSpec]): Tool specifications (unused).
+            system_prompt (str): System prompt text (unused).
+
+        Raises:
+            NotImplementedError: Always raised; RoleColon does not support tool calling.
+        """
         raise NotImplementedError("RoleColonRenderer does not support tool calling")

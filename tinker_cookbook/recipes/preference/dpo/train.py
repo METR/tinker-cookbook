@@ -5,7 +5,8 @@ Basic CLI for training with Direct Preference Optimization (DPO). It only suppor
 from datetime import datetime
 
 import chz
-from tinker_cookbook import cli_utils, model_info
+
+from tinker_cookbook import checkpoint_utils, cli_utils
 from tinker_cookbook.preference import train_dpo
 from tinker_cookbook.preference.dpo_datasets import (
     DPODatasetBuilderFromComparisons,
@@ -46,6 +47,8 @@ class CLIConfig:
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
+    max_steps: int | None = None
+
 
 def get_dataset_builder(
     dataset: str,
@@ -81,8 +84,11 @@ def get_dataset_builder(
 def cli_main(cli_config: CLIConfig):
     """Main CLI function that builds the full config and calls the training function."""
     # Build full config
-    renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
-        cli_config.model_name
+    renderer_name = checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default(
+        model_name=cli_config.model_name,
+        explicit_renderer_name=cli_config.renderer_name,
+        load_checkpoint_path=cli_config.load_checkpoint_path,
+        base_url=cli_config.base_url,
     )
     date_and_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
     model_name = cli_config.model_name.replace("/", "-")
@@ -101,6 +107,7 @@ def cli_main(cli_config: CLIConfig):
     config = train_dpo.Config(
         log_path=log_path,
         model_name=cli_config.model_name,
+        renderer_name=renderer_name,
         dataset_builder=get_dataset_builder(
             cli_config.dataset,
             cli_config.model_name,
@@ -117,10 +124,12 @@ def cli_main(cli_config: CLIConfig):
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
         reference_model_name=cli_config.reference_model_name,
+        max_steps=cli_config.max_steps,
     )
 
     train_dpo.main(config)
 
 
 if __name__ == "__main__":
-    chz.nested_entrypoint(cli_main)
+    cli_config = chz.entrypoint(CLIConfig)
+    cli_main(cli_config)

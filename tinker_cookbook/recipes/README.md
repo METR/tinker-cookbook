@@ -9,7 +9,7 @@ Tinker Cookbook comes with useful abstractions so you can flexibly customize you
 - [`rl_basic.py`](./rl_basic.py): a template script to configure reinforcement learning.
 - [`sl_basic.py`](./sl_basic.py): a template script to configure supervised learning.
 
-To explain what goes under-the-hood, we also provide minimal, self-contained scripts that directly use the TinkerAPI to train LLMs.
+To explain what goes under-the-hood, we also provide minimal, self-contained scripts that directly use the Tinker API to train LLMs.
 - [`rl_loop.py`](./rl_loop.py): a minimal reinforcement learning training loop.
 - [`sl_loop.py`](./sl_loop.py): a minimal supervised learning training loop.
 
@@ -17,13 +17,20 @@ To explain what goes under-the-hood, we also provide minimal, self-contained scr
 
 Building on Tinker and Tinker Cookbook, we can easily customize a wide range of training environments for LLMs.
 We provide the following examples:
-1. **[Chat supervised learning](./chat_sl/)**: supervised fine-tuning on conversational datasets like Tulu3.
-2. **[Math reasoning](./math_rl/)**: improve LLM reasoning capability by rewarding it for answering math questions correctly.
-3. **[Preference learning](./preference/)**: showcase a three-stage RLHF pipeline: 1) supervised fine-tuning, 2) learning a reward model, 3) RL against the reward model.
-4. **[Tool use](./search_tool/)**: train LLMs to better use retrieval tools to answer questions more accurately.
-5. **[Prompt distillation](./prompt_distillation/)**: internalize long and complex instructions into LLMs.
-6. **[Multi-Agent](./multiplayer_rl/)**: optimize LLMs to play against another LLM or themselves.
-7. **[Model distillation](./distillation/)**: use on-policy distillation or SFT to distill intelligence from a teacher model.
+- **[Chat supervised learning](./chat_sl/)**: supervised fine-tuning on conversational datasets like Tulu3.
+- **[Math reasoning](./math_rl/)**: improve LLM reasoning capability by rewarding it for answering math questions correctly.
+- **[Code reasoning](./code_rl/)**: train LLMs on competitive programming problems with sandboxed code execution (DeepCoder replication).
+- **[Preference learning](./preference/)**: showcase a three-stage RLHF pipeline: 1) supervised fine-tuning, 2) learning a reward model, 3) RL against the reward model.
+- **[Tool use](./search_tool/)**: train LLMs to better use retrieval tools to answer questions more accurately.
+- **[Prompt distillation](./prompt_distillation/)**: internalize long and complex instructions into LLMs.
+- **[Multi-Agent](./multiplayer_rl/)**: optimize LLMs to play against another LLM or themselves.
+- **[Model distillation](./distillation/)**: use on-policy distillation or SFT to distill intelligence from a teacher model.
+- **[Rubric-based grading](./rubric/)**: use an LLM grader with rubrics to provide rewards for RL training.
+- **[Verifiers environments](./verifiers_rl/)**: use RL environments from Prime Intellect's Environments Hub with Tinker.
+- **[VLM image classification](./vlm_classifier/)**: train vision-language models as image classifiers.
+- **[Harbor RL](./harbor_rl/)**: RL training on Harbor-formatted tasks (e.g., Terminal-Bench) with sandboxed code execution.
+- **[Self-Distillation Fine-Tuning (SDFT)](./sdft/)**: self-distillation via top-K forward KL loss without a separate teacher deployment.
+- **[True Thinking Score (TTS)](./true_thinking_score/)**: quantify the faithfulness of chain-of-thought reasoning to the model's final answer.
 
 These examples are located in each subfolder, and their `README.md` file will walk you through the key implementation details, the commands to run them, and the expected performance.
 
